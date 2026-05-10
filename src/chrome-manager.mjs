@@ -58,11 +58,15 @@ async function waitForCdp(port, timeoutMs = 30000) {
 /**
  * Is the recorded Chrome session reachable? Works for both attach and spawn
  * modes. For spawn mode also checks the recorded pid is alive.
+ *
+ * Requires `mode` to be set — orphan port records (from a stop that didn't
+ * also clear port) shouldn't make `isChromeReady` lie about ownership.
+ *
  * @returns {Promise<boolean>}
  */
 export async function isChromeReady() {
   const s = readState();
-  if (!s.port) return false;
+  if (!s.mode || !s.port) return false;
   if (s.mode === 'spawn' && (!s.pid || !isAlive(s.pid))) return false;
   return (await probeCdp(s.port)) != null;
 }
@@ -196,7 +200,7 @@ export function stopChrome() {
       detached: true,
       windowsHide: true,
     }).unref();
-    writeState({ pid: undefined, mode: undefined, lastStoppedAt: new Date().toISOString() });
+    writeState({ pid: undefined, port: undefined, mode: undefined, lastStoppedAt: new Date().toISOString() });
     return { killed: true, mode: 'spawn', pid: s.pid };
   } catch (err) {
     return { killed: false, mode: 'spawn', pid: s.pid };

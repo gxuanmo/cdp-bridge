@@ -1,12 +1,47 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { userChromeDataDir } from '../paths.mjs';
 import { log } from '../logger.mjs';
 
-const FLAGS = [
-  '--remote-debugging-port=9222',
-  '--remote-debugging-address=127.0.0.1',
-  '--remote-allow-origins=http://127.0.0.1:9222',
+/**
+ * The flags we currently inject. Order matters only cosmetically.
+ *
+ * `--user-data-dir` is REQUIRED by Chrome 136+: when you ask for
+ * `--remote-debugging-port` without explicitly opting your profile in
+ * via `--user-data-dir`, Chrome silently refuses to bind the DevTools
+ * port (anti-cookie-theft hardening). Setting `--user-data-dir` to the
+ * default Chrome User Data path keeps the user on their normal profile
+ * AND satisfies Chrome's "you know what you're doing" check.
+ *
+ * We do NOT add `--remote-allow-origins` — the local CDP clients used
+ * here (Node WebSocket) work with Chrome's default origin rules.
+ */
+function buildFlags() {
+  // Default Chrome User Data dir contains a space ("User Data") so the
+  // value MUST be quoted in the .lnk Arguments string. Without quotes
+  // CreateProcess splits on the space and Chrome receives a truncated
+  // path → falls back to default profile, which then trips the very
+  // anti-DevTools rule we're trying to satisfy.
+  const udd = userChromeDataDir();
+  const uddFlag = /\s/.test(udd) ? '--user-data-dir="' + udd + '"' : '--user-data-dir=' + udd;
+  return [
+    uddFlag,
+    '--remote-debugging-port=9222',
+    '--remote-debugging-address=127.0.0.1',
+  ];
+}
+
+/**
+ * Flag names we manage. Used as the match key for both add (de-dup before
+ * append) and revert (filter out). Includes legacy names so a shortcut
+ * patched by an older cdpb gets cleanly overwritten on re-run.
+ */
+const MANAGED_FLAG_NAMES = [
+  '--user-data-dir',
+  '--remote-debugging-port',
+  '--remote-debugging-address',
+  '--remote-allow-origins', // legacy: removed in v0.2 but still strip on revert
 ];
 
 /**
@@ -56,16 +91,17 @@ export async function run(argv) {
   const revert = argv.includes('--revert');
   const includeRegistry = argv.includes('--include-registry');
 
+  const flags = buildFlags();
   const targets = shortcutCandidates();
   if (targets.length === 0) {
-    throw new Error('no Chrome shortcuts found in standard locations. Modify your shortcut manually with the flags: ' + FLAGS.join(' '));
+    throw new Error('no Chrome shortcuts found in standard locations. Modify your shortcut manually with the flags: ' + flags.join(' '));
   }
 
   log.info((dryRun ? 'DRY RUN — ' : '') + (revert ? 'reverting' : 'patching') + ' ' + targets.length + ' shortcut(s)');
   for (const lnk of targets) {
     try {
       const before = readShortcut(lnk);
-      const after = revert ? removeFlags(before.args) : addFlags(before.args);
+      const after = revert ? removeFlags(before.args) : addFlags(before.args, flags);
       if (before.args === after) {
         log.info('  unchanged: ' + lnk + (revert ? ' (no flags to remove)' : ' (already patched)'));
         continue;
@@ -124,29 +160,31 @@ function writeShortcut(lnk, target, args) {
   });
 }
 
-function addFlags(existing) {
-  const tokens = splitArgs(existing);
-  const without = tokens.filter((t) => !FLAGS.some((f) => t.startsWith(stripValue(f) + '=') || t === stripValue(f)));
-  return [...without, ...FLAGS].join(' ').trim();
+/** True if `token` is one of our managed flags (any value). */
+function isManagedToken(token) {
+  return MANAGED_FLAG_NAMES.some((name) => token === name || token.startsWith(name + '='));
+}
+
+function addFlags(existing, newFlags) {
+  const tokens = splitArgs(existing).filter((t) => !isManagedToken(t));
+  return [...tokens, ...newFlags].join(' ').trim();
 }
 
 function removeFlags(existing) {
-  const tokens = splitArgs(existing);
-  return tokens
-    .filter((t) => !FLAGS.some((f) => t.startsWith(stripValue(f) + '=') || t === stripValue(f)))
-    .join(' ')
-    .trim();
+  return splitArgs(existing).filter((t) => !isManagedToken(t)).join(' ').trim();
 }
 
-/** Strip the value portion of `--flag=value` so we can match the flag name alone. */
-function stripValue(flag) {
-  const i = flag.indexOf('=');
-  return i < 0 ? flag : flag.slice(0, i);
-}
-
-/** Naive arg split — Chrome flags don't contain spaces in their values. */
+/**
+ * Quote-aware tokenizer for Windows command-line argument strings.
+ * Treats a contiguous run of (non-whitespace-non-quote chunks OR
+ * "quoted-string" chunks) as a single token, matching how
+ * CreateProcess parses cmdlines.
+ *
+ * Example: `--user-data-dir="C:\My Path" --port=9222`
+ *   → ['--user-data-dir="C:\My Path"', '--port=9222']
+ */
 function splitArgs(s) {
-  return s.split(/\s+/).filter(Boolean);
+  return s.match(/(?:[^\s"]+|"[^"]*")+/g) ?? [];
 }
 
 /**
@@ -171,7 +209,8 @@ function patchChromeHtmlRegistry({ revert, dryRun }) {
     return;
   }
 
-  const target = revert ? removeFlagsInRegistryValue(current) : addFlagsInRegistryValue(current);
+  const flags = buildFlags();
+  const target = revert ? removeFlagsInRegistryValue(current) : addFlagsInRegistryValue(current, flags);
   if (target === current) {
     log.info('  registry value unchanged');
     return;
@@ -182,14 +221,15 @@ function patchChromeHtmlRegistry({ revert, dryRun }) {
   execFileSync('reg', ['add', key, '/ve', '/d', target, '/f'], { windowsHide: true });
 }
 
-function addFlagsInRegistryValue(value) {
+function addFlagsInRegistryValue(value, newFlags) {
   // Layout: "<path-to-chrome.exe>" <existing-args>
   const m = /^("[^"]+")\s*(.*)$/.exec(value);
   if (!m) return value;
   const exe = m[1];
   const rest = m[2] ?? '';
-  const without = splitArgs(rest).filter((t) => !FLAGS.some((f) => t.startsWith(stripValue(f) + '=') || t === stripValue(f)));
-  return [exe, ...FLAGS, ...without].join(' ');
+  const without = splitArgs(rest).filter((t) => !isManagedToken(t));
+  // Keep `%1` style placeholders at the end so Chrome still receives the URL.
+  return [exe, ...newFlags, ...without].join(' ');
 }
 
 function removeFlagsInRegistryValue(value) {
@@ -197,8 +237,6 @@ function removeFlagsInRegistryValue(value) {
   if (!m) return value;
   const exe = m[1];
   const rest = m[2] ?? '';
-  const cleaned = splitArgs(rest)
-    .filter((t) => !FLAGS.some((f) => t.startsWith(stripValue(f) + '=') || t === stripValue(f)))
-    .join(' ');
+  const cleaned = splitArgs(rest).filter((t) => !isManagedToken(t)).join(' ');
   return cleaned ? exe + ' ' + cleaned : exe;
 }
