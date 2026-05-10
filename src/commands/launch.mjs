@@ -53,6 +53,18 @@ export async function run(argv) {
   log.info('probing user Chrome at 127.0.0.1:' + attachPort + '...');
   const attached = await tryAttach({ ports: [attachPort] });
   if (attached) {
+    // Warn about flags that only mean something in spawn mode, so users
+    // who pass them expecting an effect aren't silently disappointed.
+    const droppedFlags = [];
+    if (proxyVal !== undefined) droppedFlags.push('--proxy');
+    if (headless) droppedFlags.push('--headless');
+    if (wantResync) droppedFlags.push('--resync');
+    if (droppedFlags.length) {
+      log.warn(
+        'attach mode ignores ' + droppedFlags.join(', ') +
+          ' — these only apply to spawn mode (the daily Chrome you attached to was started with its own flags).',
+      );
+    }
     recordAttach(attached);
     log.info('attached to user Chrome port=' + attached.port + ' product=' + attached.version.Browser);
     log.info('  using your daily Chrome — all cookies, extensions, login state are live');
@@ -66,13 +78,13 @@ export async function run(argv) {
     );
   }
 
-  // Default mode without --attach: helpful message, NOT a silent spawn fallback.
-  log.error(
+  // Default mode without --attach: helpful, actionable error. We throw so the
+  // CLI router (bin/cdpb.mjs) does the logging + non-zero exit uniformly.
+  throw new Error(
     'no Chrome with CDP on port ' + attachPort + ' — pick one:\n' +
       '  1. `cdpb setup-shortcut` then restart Chrome from your shortcut (recommended; full login state)\n' +
       '  2. `cdpb launch --spawn` to spawn an isolated sidecar Chrome (no login state, ABE-limited)',
   );
-  process.exit(1);
 }
 
 async function doSpawn({ port, headless, proxyVal, wantResync }) {

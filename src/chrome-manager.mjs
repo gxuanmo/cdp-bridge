@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import { openSync, mkdirSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 import { paths, findChromeExe } from './paths.mjs';
@@ -70,9 +70,6 @@ export async function isChromeReady() {
   if (s.mode === 'spawn' && (!s.pid || !isAlive(s.pid))) return false;
   return (await probeCdp(s.port)) != null;
 }
-
-/** Back-compat alias used by older command files. */
-export const isSidecarRunning = isChromeReady;
 
 /**
  * Try to attach to the user's daily Chrome via CDP. Probes a list of common
@@ -148,19 +145,29 @@ export async function spawnSidecar(opts = {}) {
   if (!child.pid) throw new Error('Failed to spawn chrome.exe');
   log.info('spawned chrome.exe pid=' + child.pid + ' port=' + port + (proxy ? ' proxy=' + proxy : ' proxy=none'));
 
-  const version = await waitForCdp(port, 30000);
+  // Persist BEFORE waiting on CDP so that if waitForCdp times out (locked
+  // user-data-dir, ABE policy, AV delay, etc.) `cdpb stop` can still kill
+  // the orphan via state.json. We patch the record again on success to add
+  // version/profile timestamps.
   writeState({
     mode: 'spawn',
     pid: child.pid,
     port,
     proxy: proxy ?? undefined,
-    profileSyncedAt: new Date().toISOString(),
   });
+
+  let version;
+  try {
+    version = await waitForCdp(port, 30000);
+  } catch (err) {
+    // Leave state.json populated so user can `cdpb stop` to recover.
+    throw new Error(
+      err.message + ' — chrome.exe pid=' + child.pid + ' is detached; run `cdpb stop` to kill it.',
+    );
+  }
+  writeState({ profileSyncedAt: new Date().toISOString() });
   return { pid: child.pid, port, version, proxy };
 }
-
-/** Back-compat alias. */
-export const launchSidecar = spawnSidecar;
 
 /**
  * Persist an attach connection. We don't know the daily Chrome's pid (and
@@ -194,20 +201,24 @@ export function stopChrome() {
   }
 
   if (!s.pid) return { killed: false, mode: 'spawn' };
+  // Synchronous taskkill so we actually know if it succeeded — the previous
+  // detached spawn returned {killed:true} regardless of outcome.
   try {
-    spawn('taskkill', ['/PID', String(s.pid), '/T', '/F'], {
+    execFileSync('taskkill', ['/PID', String(s.pid), '/T', '/F'], {
       stdio: 'ignore',
-      detached: true,
       windowsHide: true,
-    }).unref();
-    writeState({ pid: undefined, port: undefined, mode: undefined, lastStoppedAt: new Date().toISOString() });
-    return { killed: true, mode: 'spawn', pid: s.pid };
+    });
   } catch (err) {
+    // taskkill exits non-zero if the pid is already gone (128) or access
+    // denied. Treat "already gone" as success — we wanted it dead, it's dead.
+    if (!isAlive(s.pid)) {
+      writeState({ pid: undefined, port: undefined, mode: undefined, lastStoppedAt: new Date().toISOString() });
+      return { killed: true, mode: 'spawn', pid: s.pid };
+    }
     return { killed: false, mode: 'spawn', pid: s.pid };
   }
+  writeState({ pid: undefined, port: undefined, mode: undefined, lastStoppedAt: new Date().toISOString() });
+  return { killed: true, mode: 'spawn', pid: s.pid };
 }
-
-/** Back-compat alias. */
-export const stopSidecar = stopChrome;
 
 export const PORTS = { default: DEFAULT_PORT, sidecar: SIDECAR_PORT };

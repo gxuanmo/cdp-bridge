@@ -65,18 +65,21 @@ function shortcutCandidates() {
 }
 
 /**
- * cdpb setup-shortcut [--dry-run] [--revert]
+ * cdpb setup-shortcut [--dry-run] [--revert] [--include-registry] [--force]
  *
- * Adds (or removes, with --revert) these flags to each found Chrome
- * shortcut's Arguments:
+ * Adds (or removes, with --revert) the flags returned by `buildFlags()` to
+ * each found Chrome shortcut's Arguments. Currently:
+ *   --user-data-dir="<default Chrome User Data path>"
  *   --remote-debugging-port=9222
  *   --remote-debugging-address=127.0.0.1
- *   --remote-allow-origins=http://127.0.0.1:9222
+ * On revert, the legacy `--remote-allow-origins=...` (added by older cdpb
+ * versions) is also stripped — see MANAGED_FLAG_NAMES.
  *
  * After modifying, the user must close every Chrome window (so the running
- * Chrome process exits — Chrome doesn't re-read flags on tab open) and
- * re-launch from one of the modified shortcuts. Subsequent `cdpb launch`
- * will then attach to that Chrome.
+ * Chrome process exits — Chrome's single-instance pickup means a new
+ * launch with the same user-data-dir merges into the running process and
+ * drops the new flags). The command refuses to patch when chrome.exe
+ * browser processes are detected, unless --force is given.
  *
  * Limitations:
  *  - File double-click (default-browser handler) bypasses .lnk and reads
@@ -84,17 +87,37 @@ function shortcutCandidates() {
  *    by default — invoke `--include-registry` to opt in (writes to
  *    HKCU\Software\Classes\ChromeHTML; user-scoped, no admin).
  *  - Machine-wide shortcuts (in PUBLIC / PROGRAMDATA) need admin to write;
- *    we report them as "needs admin" rather than fail.
+ *    failures land in the per-shortcut catch and are logged as "failed:".
  */
 export async function run(argv) {
   const dryRun = argv.includes('--dry-run');
   const revert = argv.includes('--revert');
   const includeRegistry = argv.includes('--include-registry');
+  const force = argv.includes('--force');
 
   const flags = buildFlags();
   const targets = shortcutCandidates();
   if (targets.length === 0) {
     throw new Error('no Chrome shortcuts found in standard locations. Modify your shortcut manually with the flags: ' + flags.join(' '));
+  }
+
+  // Chrome is single-instance per user-data-dir. If the user is running
+  // chrome.exe right now and re-launches from a freshly patched .lnk, the
+  // new chrome.exe just sends "open new window" IPC to the existing
+  // process and exits — our flags are dropped on the floor and
+  // `cdpb launch` will keep failing with "no Chrome with CDP". Detect this
+  // up front, since a one-line warning here saves a confusing 10-minute
+  // debug session.
+  if (!dryRun && !revert && !force) {
+    const running = chromeBrowserPidsRunning();
+    if (running.length > 0) {
+      throw new Error(
+        running.length + ' chrome.exe browser process(es) are running (pids: ' + running.join(', ') + '). ' +
+          'Patching the shortcut now is fine, but the patched flags only take effect when Chrome ' +
+          'starts FRESH from the modified shortcut. Close ALL Chrome windows first, then re-run ' +
+          '`cdpb setup-shortcut`. Or pass `--force` to patch anyway and remember to fully exit Chrome before re-launching.',
+      );
+    }
   }
 
   log.info((dryRun ? 'DRY RUN — ' : '') + (revert ? 'reverting' : 'patching') + ' ' + targets.length + ' shortcut(s)');
@@ -185,6 +208,41 @@ function removeFlags(existing) {
  */
 function splitArgs(s) {
   return s.match(/(?:[^\s"]+|"[^"]*")+/g) ?? [];
+}
+
+/**
+ * Return pids of chrome.exe BROWSER processes (not renderer/gpu/utility
+ * children). Uses PowerShell Get-CimInstance because cmdline filtering is
+ * the only way to distinguish browser from child processes; ~500ms but
+ * acceptable for a one-shot setup command.
+ *
+ * Includes any Chromium-derived chrome.exe — e.g. Playwright MCP's
+ * sandbox, our own --spawn sidecar — which is correct: the user is about
+ * to modify a shortcut and we want to warn before *any* such instance
+ * could grab the next launch's flags.
+ *
+ * @returns {number[]}
+ */
+function chromeBrowserPidsRunning() {
+  try {
+    const script =
+      "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | " +
+      "Where-Object { $_.CommandLine -notmatch '--type=' } | " +
+      "Select-Object -ExpandProperty ProcessId";
+    const out = execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], {
+      encoding: 'utf8',
+      windowsHide: true,
+    });
+    return out
+      .split(/\r?\n/)
+      .map((s) => parseInt(s.trim(), 10))
+      .filter((n) => Number.isFinite(n));
+  } catch {
+    // If the probe itself fails (no PowerShell, permissions, etc.), don't
+    // block setup-shortcut — the worst case is the existing "next: close
+    // Chrome" advisory remains the only signal.
+    return [];
+  }
 }
 
 /**
