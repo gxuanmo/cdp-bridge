@@ -1,0 +1,23 @@
+{
+  "name": "cdp-bridge",
+  "version": "0.1.0",
+  "description": "Drive a sidecar Chrome via CDP, reusing your real profile (proxies, cookies, extensions) without touching your daily Chrome.",
+  "type": "module",
+  "bin": {
+    "cdpb": "bin/cdpb.mjs"
+  },
+  "scripts": {
+    "start": "node bin/cdpb.mjs"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "files": [
+    "bin",
+    "src",
+    "skill",
+    "CLAUDE.md",
+    "README.md"
+  ],
+  "license": "MIT"
+}
