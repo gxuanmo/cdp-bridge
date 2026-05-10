@@ -1,43 +1,63 @@
 ---
 name: cdp-bridge
-description: 用 sidecar Chrome 突破慢网下载与登录壁垒。当需要下载 GitHub 大仓库 / 安装 npx skill / 抓需要登录态或代理才能拿到的资源时使用。本机有用户日常 Chrome 装着代理扩展、登录态、Cookie，cdp-bridge 启动一个独立 Chrome 副本，复用这些状态走 CDP 协议下载——既不打扰用户日常 Chrome，又能享受其网络配置。当用户提到"下载慢""装不上 skill""GitHub 抓不下来""要走我浏览器代理"时优先使用。
+description: 用 CDP 驱动用户日常 Chrome 完成下载/抓取/装 skill 等任务。默认 attach 模式直接连接已带 --remote-debugging-port 启动的日常 Chrome，复用全部 cookie/登录态/扩展/代理；fallback 是 spawn 独立 sidecar Chrome。当用户提到"下载慢""装不上 skill""GitHub 抓不下来""要走我浏览器代理""操作我 Chrome""保持登录态"时使用。命令是 cdpb。
 ---
 
 # cdp-bridge
 
-让 agent / 脚本通过用户日常 Chrome 的 sidecar 副本下载文件、装 GitHub skill、读需登录的页面。命令行工具 `cdpb`，Node 22+，Windows 优先。
+CDP-based 浏览器自动化工具，命令行 `cdpb`，两种模式：
+- **attach**（默认）：连接你日常 Chrome，所有登录态/cookie/扩展原生可用
+- **spawn**：启独立 sidecar Chrome，profile 选择性拷贝（ABE 限制：每个网站要重登）
+
+Node 22+，Windows 优先。
 
 ## 何时用
 
 - 直接 curl/PowerShell 下 GitHub 大文件极慢（国内常见）
 - 要装一个 `npx skills add <repo>` 的 skill 但 git clone 超时
-- 抓的内容需要用户浏览器登录态或代理才能正常拿
-- 想在 agent 里跑 JS 操作页面，但又不想动用户日常 Chrome 的 tab
+- 抓的内容需要用户浏览器登录态或代理才能正常拿（**用 attach 模式**）
+- 想在 agent 里跑 JS 操作页面（attach: 可以；spawn: 要先登录）
+
+**先 `cdpb status` 看一下当前模式 / 是否 ready**——再决定后续操作。
 
 ## 快速判断
 
 | 场景 | 用什么 |
 |------|--------|
+| 第一次配置 | `cdpb setup-shortcut` 改 Chrome 快捷方式，**完整关闭 Chrome 后从修改后的快捷方式重启**，再 `cdpb launch` |
 | 装 GitHub skill | `cdpb install-skill owner/repo -g` |
 | 下任意 URL | `cdpb fetch <url> -o <path>` |
 | 看 Chrome 是否就绪 | `cdpb status` |
-| 启动 sidecar | `cdpb launch` |
-| 关掉 sidecar | `cdpb stop` |
-| 刷新书签/扩展（不动 cookies） | `cdpb stop && cdpb sync-profile` |
-| 重置全部 profile（**会清登录态**） | `cdpb stop && cdpb sync-profile --full` |
+| 启动会话（默认 attach） | `cdpb launch` |
+| 启动独立 sidecar（fallback） | `cdpb launch --spawn` |
+| 关掉会话 | `cdpb stop`（attach 模式只清记录，不杀你 Chrome） |
+| 刷新 sidecar 书签/扩展 | `cdpb sync-profile`（仅 spawn 模式有意义） |
 
-## 标准流程
+## 标准流程（attach 模式）
 
-第一次用，按顺序跑这两条：
-
+**首次配置（仅一次）**：
 ```
-cdpb launch              # 拷贝 profile + 启 Chrome（首次约 30 秒，因为复制 ~260MB）
+cdpb setup-shortcut       # 改你 Chrome 快捷方式加 --remote-debugging-port=9222
+# 用户操作：完全关闭 Chrome（所有窗口），从改过的快捷方式（如桌面 Chrome 图标）重新打开
+cdpb launch               # 应该 attach 上去（不再要求 setup）
+```
+
+**之后日常**：
+```
+cdpb status               # 一眼看到 ready mode=attach
 cdpb install-skill <repo> -g
 ```
 
-之后只要 sidecar 还活着，直接跑后一条。
+每次 Chrome 重启后，重启的进程仍带 `--remote-debugging-port`（因为快捷方式改过了），`cdpb launch` 会自动 attach 上。
 
-`cdpb launch` 是幂等的——已经在跑就不重启。Sidecar Chrome 在用户机器上一直开着没问题，关掉它只在你想清理时。
+## 备选流程（spawn 模式）
+
+不想改 Chrome 启动方式、或要在没装 Chrome 的环境跑：
+```
+cdpb launch --spawn       # 启独立 sidecar Chrome 在 9223 端口
+# 在 sidecar 里手动登一次 claude.ai / GitHub / 别的需要的网站（一次性）
+cdpb install-skill <repo> -g
+```
 
 ## 重要约束
 

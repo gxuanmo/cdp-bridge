@@ -1,20 +1,25 @@
 import { mkdirSync, renameSync, existsSync } from 'node:fs';
-import { dirname, basename, join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { connectBrowser, openPage, closeTarget } from './cdp-client.mjs';
 import { paths } from './paths.mjs';
 import { log } from './logger.mjs';
 
 /**
- * Download a URL through the sidecar Chrome (so the user's proxy/extensions
- * apply). Returns the absolute path of the downloaded file.
+ * Download a URL through Chrome (sidecar OR user's daily Chrome via attach
+ * mode). Returns the absolute path of the downloaded file.
  *
- * Strategy:
- *  1. Use Browser.setDownloadBehavior to redirect downloads to a private dir.
- *  2. Subscribe to Browser.downloadWillBegin / Browser.downloadProgress.
- *  3. Open a new page navigating to URL — Chrome auto-handles the download
- *     (URLs that don't trigger a download will load as a normal page; we
- *     bail with an error after a short grace window in that case).
- *  4. Move the resulting file to outputPath (if provided).
+ * Mechanics:
+ *  1. `Browser.setDownloadBehavior(allowAndName, <staging>)` — redirects
+ *     downloads to our private staging dir. **Caveat in attach mode**: this
+ *     applies to the entire default browser context, so any download the
+ *     user manually triggers in their Chrome during this call also lands in
+ *     the staging dir. We restore the default behavior in the `finally`
+ *     block to keep the affected window as small as possible.
+ *  2. Subscribe to `Browser.downloadWillBegin` / `Browser.downloadProgress`
+ *     to track our specific guid.
+ *  3. Open a NEW background tab navigating to the URL — `background: true`
+ *     prevents stealing focus from the user's current tab.
+ *  4. On completion, move the staged file to `outputPath`.
  *
  * @param {{
  *   port: number,
@@ -31,9 +36,6 @@ export async function downloadViaChrome({ port, url, outputPath, timeoutMs = 10 
 
   const browser = await connectBrowser(port);
 
-  // Browser.setDownloadBehavior is a browser-level command.
-  // behavior=allowAndName -> Chrome uses guid as filename (deterministic, no clobber).
-  // eventsEnabled=true is required to receive Browser.downloadWillBegin/Progress.
   await browser.send('Browser.setDownloadBehavior', {
     behavior: 'allowAndName',
     downloadPath: stagingDir,
@@ -42,7 +44,6 @@ export async function downloadViaChrome({ port, url, outputPath, timeoutMs = 10 
 
   /** @type {{ guid: string, suggestedFilename: string } | null} */
   let beginInfo = null;
-  /** @type {Promise<{ guid: string, totalBytes?: number }>} */
   const completion = new Promise((resolveDone, rejectDone) => {
     const offBegin = browser.on('Browser.downloadWillBegin', (p) => {
       if (p.url === url || beginInfo == null) {
@@ -65,13 +66,9 @@ export async function downloadViaChrome({ port, url, outputPath, timeoutMs = 10 
     });
   });
 
-  // Open the URL in a new tab. Chrome will detect Content-Disposition and start
-  // a download; the page itself becomes "blank" (about:blank).
-  const { targetId } = await openPage(port, url);
+  const { targetId } = await openPage(port, url, { background: true });
 
-  /** @type {NodeJS.Timeout | undefined} */
   let timer;
-  /** @type {Promise<never>} */
   const timeout = new Promise((_, rej) => {
     timer = setTimeout(() => rej(new Error('download timeout after ' + timeoutMs + 'ms')), timeoutMs);
   });
@@ -87,21 +84,20 @@ export async function downloadViaChrome({ port, url, outputPath, timeoutMs = 10 
       throw new Error('download completed but file missing at ' + stagedFile);
     }
 
-    if (outputPath) {
-      finalPath = resolve(outputPath);
-      mkdirSync(dirname(finalPath), { recursive: true });
-      renameSync(stagedFile, finalPath);
-    } else {
-      finalPath = join(paths.downloads, beginInfo.suggestedFilename);
-      mkdirSync(dirname(finalPath), { recursive: true });
-      renameSync(stagedFile, finalPath);
-    }
+    finalPath = outputPath ? resolve(outputPath) : join(paths.downloads, beginInfo.suggestedFilename);
+    mkdirSync(dirname(finalPath), { recursive: true });
+    renameSync(stagedFile, finalPath);
 
     log.info('downloaded ' + finalPath + (done.totalBytes ? ' (' + done.totalBytes + ' bytes)' : ''));
     return finalPath;
   } finally {
     if (timer) clearTimeout(timer);
     try { await closeTarget(port, targetId); } catch {}
+    // Restore default download behavior so the user's manual downloads
+    // resume going wherever Chrome's Preferences say (usually ~/Downloads).
+    try {
+      await browser.send('Browser.setDownloadBehavior', { behavior: 'default' });
+    } catch {}
     browser.close();
   }
 }

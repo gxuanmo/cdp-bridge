@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { existsSync, openSync, mkdirSync } from 'node:fs';
+import { openSync, mkdirSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 import { paths, findChromeExe } from './paths.mjs';
 import { readState, writeState } from './state.mjs';
@@ -7,6 +7,7 @@ import { getWindowsSystemProxy } from './system-proxy.mjs';
 import { log } from './logger.mjs';
 
 const DEFAULT_PORT = 9222;
+const SIDECAR_PORT = 9223;
 
 /**
  * Check if a process is alive on Windows by sending signal 0.
@@ -55,64 +56,80 @@ async function waitForCdp(port, timeoutMs = 30000) {
 }
 
 /**
- * Whether the recorded sidecar Chrome is alive AND its CDP port answers.
+ * Is the recorded Chrome session reachable? Works for both attach and spawn
+ * modes. For spawn mode also checks the recorded pid is alive.
  * @returns {Promise<boolean>}
  */
-export async function isSidecarRunning() {
+export async function isChromeReady() {
   const s = readState();
-  if (!s.pid || !s.port) return false;
-  if (!isAlive(s.pid)) return false;
-  const v = await probeCdp(s.port);
-  return v != null;
+  if (!s.port) return false;
+  if (s.mode === 'spawn' && (!s.pid || !isAlive(s.pid))) return false;
+  return (await probeCdp(s.port)) != null;
+}
+
+/** Back-compat alias used by older command files. */
+export const isSidecarRunning = isChromeReady;
+
+/**
+ * Try to attach to the user's daily Chrome via CDP. Probes a list of common
+ * ports (9222 by default; 9223 reserved for our spawned sidecar so we don't
+ * accidentally attach to ourselves and re-spawn).
+ *
+ * @param {{ ports?: number[] }} [opts]
+ * @returns {Promise<{ port: number, version: object } | null>}
+ */
+export async function tryAttach(opts = {}) {
+  const ports = opts.ports ?? [DEFAULT_PORT];
+  for (const p of ports) {
+    const v = await probeCdp(p);
+    if (v) return { port: p, version: v };
+  }
+  return null;
 }
 
 /**
- * Launch sidecar Chrome with CDP port. Detaches from the parent process so the
- * CLI can exit while Chrome stays running. Stderr is redirected to a log file.
+ * Resolve the proxy string Chrome should be told to use.
+ *  - explicit `opts.proxy` wins (string sets, 'none' disables)
+ *  - else read Windows system proxy from registry
+ *  - else null (no proxy flag)
+ */
+function resolveProxy(opts) {
+  if (opts.proxy === 'none') return null;
+  if (opts.proxy) return opts.proxy;
+  return getWindowsSystemProxy();
+}
+
+/**
+ * Spawn a fresh sidecar Chrome with our own profile dir and CDP port.
  *
- * Resolves the proxy in this order: explicit `opts.proxy` > Windows system
- * proxy > none. The chosen value is logged and persisted so later commands
- * can show it via `cdpb status`.
+ * The sidecar runs on SIDECAR_PORT (9223) so it never collides with the
+ * user's daily Chrome listening on 9222 — both can coexist.
+ *
+ * Detaches from the parent so the CLI can exit while Chrome stays running.
  *
  * @param {{ port?: number, headless?: boolean, proxy?: string | 'none' }} [opts]
  * @returns {Promise<{ pid: number, port: number, version: object, proxy: string | null }>}
  */
-export async function launchSidecar(opts = {}) {
-  const port = opts.port ?? DEFAULT_PORT;
+export async function spawnSidecar(opts = {}) {
+  const port = opts.port ?? SIDECAR_PORT;
   mkdirSync(paths.logsDir, { recursive: true });
   mkdirSync(paths.chromeProfile, { recursive: true });
 
-  if (await isSidecarRunning()) {
-    const s = readState();
-    const v = await probeCdp(s.port);
-    return { pid: s.pid, port: s.port, version: v, proxy: s.proxy ?? null };
+  const s = readState();
+  if (s.mode === 'spawn' && s.pid && isAlive(s.pid) && (await probeCdp(s.port))) {
+    return { pid: s.pid, port: s.port, version: await probeCdp(s.port), proxy: s.proxy ?? null };
   }
 
-  let proxy;
-  if (opts.proxy === 'none') {
-    proxy = null;
-  } else if (opts.proxy) {
-    proxy = opts.proxy;
-  } else {
-    proxy = getWindowsSystemProxy();
-  }
-
+  const proxy = resolveProxy(opts);
   const chrome = findChromeExe();
   const args = [
     '--user-data-dir=' + paths.chromeProfile,
     '--remote-debugging-port=' + port,
     '--remote-debugging-address=127.0.0.1',
-    // Lock to a single instance so a stray double-launch doesn't fork Chrome.
     '--no-first-run',
     '--no-default-browser-check',
-    // Suppress crash recovery prompt from prior dirty exits — sidecar profile
-    // is disposable and the prompt blocks automation.
     '--disable-features=ChromeWhatsNewUI',
-    // Pass proxy explicitly. Chrome would normally auto-pick up the Windows
-    // system proxy, but we observed flaky behavior with LAN proxies — being
-    // explicit removes that variable.
     ...(proxy ? ['--proxy-server=' + proxy] : []),
-    // Headless mode optional; default off so user sees the warning bar.
     ...(opts.headless ? ['--headless=new'] : []),
   ];
 
@@ -125,31 +142,68 @@ export async function launchSidecar(opts = {}) {
   child.unref();
 
   if (!child.pid) throw new Error('Failed to spawn chrome.exe');
-  log.info('launched chrome.exe pid=' + child.pid + ' port=' + port + (proxy ? ' proxy=' + proxy : ' proxy=none'));
+  log.info('spawned chrome.exe pid=' + child.pid + ' port=' + port + (proxy ? ' proxy=' + proxy : ' proxy=none'));
 
   const version = await waitForCdp(port, 30000);
-  writeState({ pid: child.pid, port, proxy: proxy ?? undefined, profileSyncedAt: new Date().toISOString() });
+  writeState({
+    mode: 'spawn',
+    pid: child.pid,
+    port,
+    proxy: proxy ?? undefined,
+    profileSyncedAt: new Date().toISOString(),
+  });
   return { pid: child.pid, port, version, proxy };
 }
 
+/** Back-compat alias. */
+export const launchSidecar = spawnSidecar;
+
 /**
- * Kill sidecar Chrome and its child processes.
- * @returns {{ killed: boolean, pid?: number }}
+ * Persist an attach connection. We don't know the daily Chrome's pid (and
+ * don't need it — we re-probe per command); we just remember the port.
+ *
+ * @param {{ port: number, version: object }} info
  */
-export function stopSidecar() {
+export function recordAttach(info) {
+  writeState({
+    mode: 'attach',
+    pid: undefined,
+    port: info.port,
+    proxy: undefined, // user's Chrome carries its own proxy config; we don't override
+  });
+}
+
+/**
+ * Stop only applies to spawn mode — we never kill the user's daily Chrome
+ * even if state.json points at it. In attach mode this just clears the
+ * connection record.
+ *
+ * @returns {{ killed: boolean, mode: 'attach' | 'spawn' | 'none', pid?: number }}
+ */
+export function stopChrome() {
   const s = readState();
-  if (!s.pid) return { killed: false };
+  if (!s.mode) return { killed: false, mode: 'none' };
+
+  if (s.mode === 'attach') {
+    writeState({ pid: undefined, port: undefined, mode: undefined, lastStoppedAt: new Date().toISOString() });
+    return { killed: false, mode: 'attach' };
+  }
+
+  if (!s.pid) return { killed: false, mode: 'spawn' };
   try {
-    // Windows: use taskkill /T /F to kill the whole tree.
-    // process.kill on Windows doesn't reliably kill child processes.
     spawn('taskkill', ['/PID', String(s.pid), '/T', '/F'], {
       stdio: 'ignore',
       detached: true,
       windowsHide: true,
     }).unref();
-    writeState({ pid: undefined, lastStoppedAt: new Date().toISOString() });
-    return { killed: true, pid: s.pid };
+    writeState({ pid: undefined, mode: undefined, lastStoppedAt: new Date().toISOString() });
+    return { killed: true, mode: 'spawn', pid: s.pid };
   } catch (err) {
-    return { killed: false, pid: s.pid };
+    return { killed: false, mode: 'spawn', pid: s.pid };
   }
 }
+
+/** Back-compat alias. */
+export const stopSidecar = stopChrome;
+
+export const PORTS = { default: DEFAULT_PORT, sidecar: SIDECAR_PORT };
