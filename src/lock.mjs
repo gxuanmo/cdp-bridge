@@ -34,6 +34,17 @@ function isAlive(pid) {
  * alive (crashed cdpb / killed via Ctrl-C without cleanup), we replace it.
  * If the lock file is unreadable garbage, same — take over.
  *
+ * **Race-safety notes**: `openSync('wx')` is atomic — only one creator wins
+ * the syscall. But stale-recovery is NOT a single syscall: we read + check
+ * pid + unlink + retry-openSync. Two concurrent recoveries could race so
+ * that one process's `unlinkSync` deletes another's freshly-acquired
+ * lock. Two defenses:
+ *   1. `handleStaleLock` re-reads the file contents RIGHT BEFORE unlink,
+ *      so if a competing process already replaced the lock between our
+ *      read-pid and our unlink, we back off.
+ *   2. After our own write, we read back the file. If the contents don't
+ *      match our claim, we lost the race and bail out of fn() entirely.
+ *
  * @template T
  * @param {() => Promise<T>} fn
  * @returns {Promise<T>}
@@ -44,22 +55,36 @@ export async function withLock(fn) {
   for (let attempt = 0; attempt < 2; attempt++) {
     let fd;
     try {
-      // wx = O_CREAT | O_EXCL — atomic create-or-fail. The OS guarantees
-      // only one process can pass this point at a time.
+      // wx = O_CREAT | O_EXCL — atomic create-or-fail.
       fd = openSync(LOCK_PATH, 'wx');
     } catch (err) {
       if (err.code !== 'EEXIST') throw err;
-      if (handleStaleLock()) continue; // unlinked stale; retry once
+      // Only attempt stale recovery once; if openSync still fails on the
+      // retry, give up — someone else is genuinely holding the lock.
+      if (attempt === 0 && handleStaleLock()) continue;
       throw lockHeldError();
     }
+    const ourClaim = JSON.stringify({ pid: process.pid, ts: Date.now() });
     try {
-      writeFileSync(fd, JSON.stringify({ pid: process.pid, ts: Date.now() }));
+      writeFileSync(fd, ourClaim);
       closeSync(fd);
       fd = null;
+      // Defense layer 2: read back. If a concurrent stale-recovery raced
+      // past us — unlinking our just-written lock and writing its own —
+      // the file content won't match what we wrote. Bail without running
+      // fn() so we don't double-hold with the racer.
+      const readBack = readFileSync(LOCK_PATH, 'utf8');
+      if (readBack !== ourClaim) throw lockHeldError();
       return await fn();
     } finally {
       if (fd != null) { try { closeSync(fd); } catch {} }
-      try { unlinkSync(LOCK_PATH); } catch {}
+      // Only unlink if the file STILL contains our claim. Avoids
+      // accidentally removing a lock another process took over after our
+      // owner went away — they own it now, leave it alone.
+      try {
+        const cur = readFileSync(LOCK_PATH, 'utf8');
+        if (cur === ourClaim) unlinkSync(LOCK_PATH);
+      } catch {}
     }
   }
 
@@ -68,22 +93,52 @@ export async function withLock(fn) {
 
 /**
  * Inspect an existing lock file; if it points at a dead pid (or is
- * unparseable), remove it so the next attempt can take over. Returns
- * true iff we unlinked something — caller should retry.
+ * unparseable garbage), remove it so the next attempt can take over.
+ * Returns true iff we unlinked — caller should retry.
+ *
+ * Race-safe: re-reads the file right before unlink and only unlinks when
+ * the content still matches what we observed as stale. If another
+ * process already replaced the lock between our pid check and our
+ * unlink, we leave their lock alone.
+ *
  * @returns {boolean}
  */
 function handleStaleLock() {
+  let content;
+  try {
+    content = readFileSync(LOCK_PATH, 'utf8');
+  } catch {
+    return false;
+  }
   let parsed;
   try {
-    parsed = JSON.parse(readFileSync(LOCK_PATH, 'utf8'));
+    parsed = JSON.parse(content);
   } catch {
-    // Unreadable. Treat as stale.
-    try { unlinkSync(LOCK_PATH); return true; } catch { return false; }
+    // Unparseable garbage. Only unlink if it's still the same garbage.
+    return unlinkIfUnchanged(content);
   }
-  if (typeof parsed.pid === 'number' && !isAlive(parsed.pid)) {
-    try { unlinkSync(LOCK_PATH); return true; } catch { return false; }
+  if (typeof parsed.pid !== 'number' || isAlive(parsed.pid)) return false;
+  return unlinkIfUnchanged(content);
+}
+
+/**
+ * Unlink LOCK_PATH only if its current contents byte-equal `expected`.
+ * Best-effort race-narrowing: the window between this re-read and the
+ * unlink is a single fs syscall (~microseconds), versus the original
+ * window of read-pid → check-alive → unlink (multiple syscalls).
+ *
+ * @param {string} expected
+ * @returns {boolean}
+ */
+function unlinkIfUnchanged(expected) {
+  try {
+    const current = readFileSync(LOCK_PATH, 'utf8');
+    if (current !== expected) return false;
+    unlinkSync(LOCK_PATH);
+    return true;
+  } catch {
+    return false;
   }
-  return false;
 }
 
 function lockHeldError() {

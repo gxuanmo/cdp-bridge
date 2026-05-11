@@ -99,7 +99,7 @@ async function main() {
     console.error('       set failed: got ' + JSON.stringify(v1));
     process.exit(1);
   }
-  console.log('       ✓ cookie readable in session 1 (value=' + v1 + ')');
+  console.log('       OK cookie readable in session 1 (value=' + v1 + ')');
 
   console.log('[2b] flushing cookie store to disk (Network.clearAcceptedEncodingsOverride is a no-op nudge — real flush happens on graceful Chrome shutdown)');
   // Give Chrome 2s to commit the cookie row to SQLite. Storage.setCookies
@@ -125,12 +125,12 @@ async function main() {
   console.log('[5/6] reading test cookie in session 2...');
   const v2 = await getCookieValue(port2, TEST_NAME);
   if (v2 !== TEST_VALUE) {
-    console.error('       ✗ FAIL: expected ' + TEST_VALUE + ' got ' + JSON.stringify(v2));
+    console.error('       FAIL: expected ' + TEST_VALUE + ' got ' + JSON.stringify(v2));
     await clearTestCookie(port2);
     cdpb('stop');
     process.exit(1);
   }
-  console.log('       ✓ cookie SURVIVED stop+launch (value=' + v2 + ')');
+  console.log('       OK cookie SURVIVED stop+launch (value=' + v2 + ')');
 
   console.log('[6/6] cleanup');
   await clearTestCookie(port2);

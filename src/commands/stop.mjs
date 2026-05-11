@@ -4,10 +4,13 @@ import { log } from '../logger.mjs';
 /**
  * cdpb stop — clean up the current Chrome session.
  *
- *  - spawn mode: kill the sidecar via `taskkill /T /F`
+ *  - spawn mode: two-stage shutdown — first ask Chrome to close gracefully
+ *    over CDP (so it flushes cookies / IndexedDB / Local Storage to its
+ *    SQLite stores), poll up to 5s for natural exit, then fall back to
+ *    `taskkill /T /F`. Logged as `(graceful close)` or `(force kill)`.
  *  - attach mode: just clear our state.json record; **never kills the
- *    user's daily Chrome**
- *  - no session: no-op
+ *    user's daily Chrome**.
+ *  - no session: no-op.
  */
 export async function run() {
   const r = await stopChrome();
