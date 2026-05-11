@@ -17,7 +17,7 @@ import { log } from '../logger.mjs';
  * We do NOT add `--remote-allow-origins` — the local CDP clients used
  * here (Node WebSocket) work with Chrome's default origin rules.
  */
-function buildFlags() {
+export function buildFlags() {
   // Default Chrome User Data dir contains a space ("User Data") so the
   // value MUST be quoted in the .lnk Arguments string. Without quotes
   // CreateProcess splits on the space and Chrome receives a truncated
@@ -37,7 +37,7 @@ function buildFlags() {
  * append) and revert (filter out). Includes legacy names so a shortcut
  * patched by an older cdpb gets cleanly overwritten on re-run.
  */
-const MANAGED_FLAG_NAMES = [
+export const MANAGED_FLAG_NAMES = [
   '--user-data-dir',
   '--remote-debugging-port',
   '--remote-debugging-address',
@@ -184,16 +184,16 @@ function writeShortcut(lnk, target, args) {
 }
 
 /** True if `token` is one of our managed flags (any value). */
-function isManagedToken(token) {
+export function isManagedToken(token) {
   return MANAGED_FLAG_NAMES.some((name) => token === name || token.startsWith(name + '='));
 }
 
-function addFlags(existing, newFlags) {
+export function addFlags(existing, newFlags) {
   const tokens = splitArgs(existing).filter((t) => !isManagedToken(t));
   return [...tokens, ...newFlags].join(' ').trim();
 }
 
-function removeFlags(existing) {
+export function removeFlags(existing) {
   return splitArgs(existing).filter((t) => !isManagedToken(t)).join(' ').trim();
 }
 
@@ -206,7 +206,7 @@ function removeFlags(existing) {
  * Example: `--user-data-dir="C:\My Path" --port=9222`
  *   → ['--user-data-dir="C:\My Path"', '--port=9222']
  */
-function splitArgs(s) {
+export function splitArgs(s) {
   return s.match(/(?:[^\s"]+|"[^"]*")+/g) ?? [];
 }
 
@@ -279,7 +279,7 @@ function patchChromeHtmlRegistry({ revert, dryRun }) {
   execFileSync('reg', ['add', key, '/ve', '/d', target, '/f'], { windowsHide: true });
 }
 
-function addFlagsInRegistryValue(value, newFlags) {
+export function addFlagsInRegistryValue(value, newFlags) {
   // Layout: "<path-to-chrome.exe>" <existing-args>
   const m = /^("[^"]+")\s*(.*)$/.exec(value);
   if (!m) return value;
@@ -290,7 +290,7 @@ function addFlagsInRegistryValue(value, newFlags) {
   return [exe, ...newFlags, ...without].join(' ');
 }
 
-function removeFlagsInRegistryValue(value) {
+export function removeFlagsInRegistryValue(value) {
   const m = /^("[^"]+")\s*(.*)$/.exec(value);
   if (!m) return value;
   const exe = m[1];
