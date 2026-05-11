@@ -185,13 +185,19 @@ export function recordAttach(info) {
 }
 
 /**
- * Stop only applies to spawn mode — we never kill the user's daily Chrome
- * even if state.json points at it. In attach mode this just clears the
- * connection record.
+ * Stop the current session. Two-stage in spawn mode for data safety:
+ *   1. Send `Browser.close` over CDP so Chrome flushes its SQLite (cookies,
+ *      IndexedDB, Local Storage) and exits cleanly. Verified empirically
+ *      that without this, recently-set cookies are lost — taskkill /F
+ *      doesn't give Chrome the milliseconds it needs to commit.
+ *   2. Poll up to 5s for the pid to exit.
+ *   3. Fall back to `taskkill /T /F` if Chrome didn't exit on its own.
  *
- * @returns {{ killed: boolean, mode: 'attach' | 'spawn' | 'none', pid?: number }}
+ * Attach mode never touches the user's Chrome — we just clear state.json.
+ *
+ * @returns {Promise<{ killed: boolean, mode: 'attach' | 'spawn' | 'none', pid?: number, graceful?: boolean }>}
  */
-export function stopChrome() {
+export async function stopChrome() {
   const s = readState();
   if (!s.mode) return { killed: false, mode: 'none' };
 
@@ -201,24 +207,54 @@ export function stopChrome() {
   }
 
   if (!s.pid) return { killed: false, mode: 'spawn' };
-  // Synchronous taskkill so we actually know if it succeeded — the previous
-  // detached spawn returned {killed:true} regardless of outcome.
-  try {
-    execFileSync('taskkill', ['/PID', String(s.pid), '/T', '/F'], {
-      stdio: 'ignore',
-      windowsHide: true,
-    });
-  } catch (err) {
-    // taskkill exits non-zero if the pid is already gone (128) or access
-    // denied. Treat "already gone" as success — we wanted it dead, it's dead.
-    if (!isAlive(s.pid)) {
-      writeState({ pid: undefined, port: undefined, mode: undefined, lastStoppedAt: new Date().toISOString() });
-      return { killed: true, mode: 'spawn', pid: s.pid };
+  const pid = s.pid;
+  const port = s.port;
+
+  // Stage 1 — graceful CDP close. Skip if CDP isn't reachable.
+  if (port && (await probeCdp(port))) {
+    await sendBrowserClose(port).catch(() => {});
+    // Stage 2 — wait up to 5s for exit.
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline) {
+      if (!isAlive(pid)) {
+        writeState({ pid: undefined, port: undefined, mode: undefined, lastStoppedAt: new Date().toISOString() });
+        return { killed: true, mode: 'spawn', pid, graceful: true };
+      }
+      await delay(150);
     }
-    return { killed: false, mode: 'spawn', pid: s.pid };
+  }
+
+  // Stage 3 — force-kill fallback.
+  try {
+    execFileSync('taskkill', ['/PID', String(pid), '/T', '/F'], {
+      stdio: 'ignore', windowsHide: true,
+    });
+  } catch {
+    if (isAlive(pid)) return { killed: false, mode: 'spawn', pid };
   }
   writeState({ pid: undefined, port: undefined, mode: undefined, lastStoppedAt: new Date().toISOString() });
-  return { killed: true, mode: 'spawn', pid: s.pid };
+  return { killed: true, mode: 'spawn', pid, graceful: false };
+}
+
+/**
+ * Connect to the browser-level CDP WebSocket and send Browser.close.
+ * Resolves when Chrome acknowledges OR the socket closes (whichever comes
+ * first), or after a 1s timeout — we don't need a clean response, just
+ * want Chrome to start its shutdown sequence.
+ */
+async function sendBrowserClose(port) {
+  const v = await probeCdp(port);
+  if (!v?.webSocketDebuggerUrl) return;
+  await new Promise((resolve) => {
+    const ws = new WebSocket(v.webSocketDebuggerUrl);
+    const timer = setTimeout(resolve, 1000);
+    ws.onopen = () => {
+      ws.send(JSON.stringify({ id: 1, method: 'Browser.close' }));
+      // Chrome closes the socket as it shuts down; that's our cue.
+    };
+    ws.onclose = () => { clearTimeout(timer); resolve(); };
+    ws.onerror = () => { clearTimeout(timer); resolve(); };
+  });
 }
 
 export const PORTS = { default: DEFAULT_PORT, sidecar: SIDECAR_PORT };
