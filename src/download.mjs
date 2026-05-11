@@ -1,4 +1,4 @@
-import { mkdirSync, renameSync, existsSync } from 'node:fs';
+import { mkdirSync, renameSync, existsSync, rmSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { connectBrowser, openPage, closeTarget } from './cdp-client.mjs';
 import { paths } from './paths.mjs';
@@ -116,5 +116,12 @@ export async function downloadViaChrome({ port, url, outputPath, timeoutMs = 10 
       await browser.send('Browser.setDownloadBehavior', { behavior: 'default' });
     } catch {}
     browser.close();
+    // Clean up the staging dir. After our successful rename our file is no
+    // longer here; anything left is from cross-traffic (downloads the user
+    // manually triggered in their Chrome that briefly inherited our
+    // download path). The frameId filter prevents us from acting on those,
+    // but their .crdownload / completed files would otherwise pile up in
+    // ~/.cdp-bridge/downloads/staging-* forever.
+    try { rmSync(stagingDir, { recursive: true, force: true }); } catch {}
   }
 }

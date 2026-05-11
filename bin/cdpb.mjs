@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { log } from '../src/logger.mjs';
+import { withLock } from '../src/lock.mjs';
 
 const COMMANDS = {
   launch: () => import('../src/commands/launch.mjs'),
@@ -10,6 +11,13 @@ const COMMANDS = {
   'sync-profile': () => import('../src/commands/sync-profile.mjs'),
   'setup-shortcut': () => import('../src/commands/setup-shortcut.mjs'),
 };
+
+// Commands that mutate state.json or shared Chrome state. Wrapped in
+// withLock() so concurrent cdpb invocations don't stomp on each other
+// (most notably Browser.setDownloadBehavior, which is browser-context-wide
+// — two simultaneous fetches would overwrite each other's download path).
+// `status` is read-only and excluded.
+const STATEFUL = new Set(['launch', 'stop', 'fetch', 'install-skill', 'sync-profile', 'setup-shortcut']);
 
 async function main() {
   const [, , cmd, ...rest] = process.argv;
@@ -27,7 +35,11 @@ async function main() {
   }
 
   const mod = await loader();
-  await mod.run(rest);
+  if (STATEFUL.has(cmd)) {
+    await withLock(() => mod.run(rest));
+  } else {
+    await mod.run(rest);
+  }
 }
 
 function printHelp() {
