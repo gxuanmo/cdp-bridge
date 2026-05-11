@@ -256,13 +256,21 @@ function chromeBrowserPidsRunning() {
  *   "C:\...\chrome.exe" --remote-debugging-port=9222 ... --single-argument %1
  */
 function patchChromeHtmlRegistry({ revert, dryRun }) {
-  const key = 'HKCU\\Software\\Classes\\ChromeHTML\\shell\\open\\command';
-  let current = '';
+  // The registry value contains embedded `"` (around chrome.exe path and
+  // around --user-data-dir value). `reg add /d "<value>"` mishandles these
+  // because reg.exe's quote parsing is non-MSCRT — it truncates at the
+  // first inner quote, corrupting the handler. We use PowerShell's
+  // Set-ItemProperty instead, which goes through the .NET registry API
+  // and stores the value byte-exactly.
+  const psKey = 'HKCU:\\Software\\Classes\\ChromeHTML\\shell\\open\\command';
+  let current;
   try {
-    const out = execFileSync('reg', ['query', key, '/ve'], { encoding: 'utf8', windowsHide: true });
-    const m = /REG_(?:EXPAND_)?SZ\s+(.+)/.exec(out);
-    if (m) current = m[1].trim();
+    current = readChromeHtmlDefault(psKey);
   } catch {
+    log.info('  no existing HKCU ChromeHTML handler — skipping (system-wide handler in HKLM is left alone)');
+    return;
+  }
+  if (current == null) {
     log.info('  no existing HKCU ChromeHTML handler — skipping (system-wide handler in HKLM is left alone)');
     return;
   }
@@ -276,7 +284,49 @@ function patchChromeHtmlRegistry({ revert, dryRun }) {
   log.info('  before: ' + current);
   log.info('  after:  ' + target);
   if (dryRun) return;
-  execFileSync('reg', ['add', key, '/ve', '/d', target, '/f'], { windowsHide: true });
+  writeChromeHtmlDefault(psKey, target);
+}
+
+/**
+ * Read HKCU\...\ChromeHTML\shell\open\command\(Default) via PowerShell.
+ * @param {string} psKey Path in PowerShell registry-drive form, e.g.
+ *   `HKCU:\Software\Classes\ChromeHTML\shell\open\command`
+ * @returns {string | null} the (Default) value, or null if key missing
+ */
+function readChromeHtmlDefault(psKey) {
+  // PowerShell's Get-ItemPropertyValue handles the `(default)` value name
+  // case-insensitively. We Out-String -NoNewline to get exact bytes back
+  // (no trailing newline injection).
+  const script =
+    "$ErrorActionPreference='Stop'; " +
+    "if (-not (Test-Path '" + psKey.replace(/'/g, "''") + "')) { return }; " +
+    "(Get-ItemProperty -Path '" + psKey.replace(/'/g, "''") + "' -Name '(default)' -ErrorAction Stop).'(default)' | Out-String -NoNewline";
+  try {
+    const out = execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], {
+      encoding: 'utf8', windowsHide: true,
+    });
+    return out === '' ? null : out;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Write HKCU\...\ChromeHTML\shell\open\command\(Default) via PowerShell.
+ * The .NET registry API used by Set-ItemProperty stores the string verbatim,
+ * so embedded `"` characters round-trip correctly.
+ */
+function writeChromeHtmlDefault(psKey, value) {
+  // Pass `value` through PowerShell here-string to avoid argv quoting
+  // ambiguity. Single-quoted here-strings don't interpolate, so embedded
+  // `$`, backtick, and `"` are literal. The only escape needed is `'` → `''`.
+  const escaped = value.replace(/'/g, "''");
+  const script =
+    "$ErrorActionPreference='Stop'; " +
+    "Set-ItemProperty -Path '" + psKey.replace(/'/g, "''") + "' -Name '(default)' -Value '" + escaped + "' -Force";
+  execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], {
+    windowsHide: true,
+  });
 }
 
 export function addFlagsInRegistryValue(value, newFlags) {
