@@ -1,20 +1,27 @@
-import { mkdirSync, renameSync, existsSync } from 'node:fs';
-import { dirname, basename, join, resolve } from 'node:path';
+import { copyFileSync, mkdirSync, renameSync, existsSync, rmSync, unlinkSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { connectBrowser, openPage, closeTarget } from './cdp-client.mjs';
 import { paths } from './paths.mjs';
 import { log } from './logger.mjs';
 
 /**
- * Download a URL through the sidecar Chrome (so the user's proxy/extensions
- * apply). Returns the absolute path of the downloaded file.
+ * Download a URL through Chrome (sidecar OR user's daily Chrome via attach
+ * mode). Returns the absolute path of the downloaded file.
  *
- * Strategy:
- *  1. Use Browser.setDownloadBehavior to redirect downloads to a private dir.
- *  2. Subscribe to Browser.downloadWillBegin / Browser.downloadProgress.
- *  3. Open a new page navigating to URL — Chrome auto-handles the download
- *     (URLs that don't trigger a download will load as a normal page; we
- *     bail with an error after a short grace window in that case).
- *  4. Move the resulting file to outputPath (if provided).
+ * Mechanics:
+ *  1. `Browser.setDownloadBehavior(allowAndName, <staging>)` — redirects
+ *     downloads to our private staging dir. **Caveat in attach mode**: this
+ *     applies to the entire default browser context, so any download the
+ *     user manually triggers in their Chrome during this call also lands in
+ *     the staging dir. We restore the default behavior in the `finally`
+ *     block to keep the affected window as small as possible.
+ *  2. Open a NEW background tab and capture its root frameId via
+ *     Page.getFrameTree. Subscribe to `Browser.downloadWillBegin` /
+ *     `Browser.downloadProgress` and **filter by frameId** so unrelated
+ *     downloads that the user triggers in their own tabs are ignored.
+ *  3. Chrome's network stack initiates the download; we wait for the
+ *     completion event for OUR guid.
+ *  4. Move the staged file to outputPath.
  *
  * @param {{
  *   port: number,
@@ -31,29 +38,38 @@ export async function downloadViaChrome({ port, url, outputPath, timeoutMs = 10 
 
   const browser = await connectBrowser(port);
 
-  // Browser.setDownloadBehavior is a browser-level command.
-  // behavior=allowAndName -> Chrome uses guid as filename (deterministic, no clobber).
-  // eventsEnabled=true is required to receive Browser.downloadWillBegin/Progress.
   await browser.send('Browser.setDownloadBehavior', {
     behavior: 'allowAndName',
     downloadPath: stagingDir,
     eventsEnabled: true,
   });
 
+  // Open our tab first so we know its frameId before any downloadWillBegin
+  // event could fire. `Target.createTarget` synchronously returns the
+  // targetId, and Page.getFrameTree on the new session returns the root
+  // frameId — both before the navigation actually triggers a download
+  // (navigation kicks in once we Page.enable / interact with the session).
+  const { session: pageSession, targetId } = await openPage(port, 'about:blank', { background: true });
+  await pageSession.send('Page.enable');
+  /** @type {{ frameTree: { frame: { id: string } } }} */
+  const tree = await pageSession.send('Page.getFrameTree');
+  const ourFrameId = tree.frameTree.frame.id;
+
   /** @type {{ guid: string, suggestedFilename: string } | null} */
   let beginInfo = null;
-  /** @type {Promise<{ guid: string, totalBytes?: number }>} */
   const completion = new Promise((resolveDone, rejectDone) => {
     const offBegin = browser.on('Browser.downloadWillBegin', (p) => {
-      if (p.url === url || beginInfo == null) {
+      // Filter strictly by frameId — only events from our tab. Skip
+      // anything else, including downloads the user triggered manually.
+      if (p.frameId !== ourFrameId) return;
+      if (beginInfo == null) {
         beginInfo = { guid: p.guid, suggestedFilename: p.suggestedFilename };
       }
     });
     const offProgress = browser.on('Browser.downloadProgress', (p) => {
-      if (onProgress && beginInfo && p.guid === beginInfo.guid) {
-        onProgress({ received: p.receivedBytes, total: p.totalBytes });
-      }
-      if (p.state === 'completed' && beginInfo && p.guid === beginInfo.guid) {
+      if (!beginInfo || p.guid !== beginInfo.guid) return;
+      if (onProgress) onProgress({ received: p.receivedBytes, total: p.totalBytes });
+      if (p.state === 'completed') {
         offBegin();
         offProgress();
         resolveDone({ guid: p.guid, totalBytes: p.totalBytes });
@@ -65,13 +81,10 @@ export async function downloadViaChrome({ port, url, outputPath, timeoutMs = 10 
     });
   });
 
-  // Open the URL in a new tab. Chrome will detect Content-Disposition and start
-  // a download; the page itself becomes "blank" (about:blank).
-  const { targetId } = await openPage(port, url);
+  // Navigate the tab we already created to the download URL.
+  await pageSession.send('Page.navigate', { url });
 
-  /** @type {NodeJS.Timeout | undefined} */
   let timer;
-  /** @type {Promise<never>} */
   const timeout = new Promise((_, rej) => {
     timer = setTimeout(() => rej(new Error('download timeout after ' + timeoutMs + 'ms')), timeoutMs);
   });
@@ -87,21 +100,38 @@ export async function downloadViaChrome({ port, url, outputPath, timeoutMs = 10 
       throw new Error('download completed but file missing at ' + stagedFile);
     }
 
-    if (outputPath) {
-      finalPath = resolve(outputPath);
-      mkdirSync(dirname(finalPath), { recursive: true });
-      renameSync(stagedFile, finalPath);
-    } else {
-      finalPath = join(paths.downloads, beginInfo.suggestedFilename);
-      mkdirSync(dirname(finalPath), { recursive: true });
-      renameSync(stagedFile, finalPath);
-    }
+    finalPath = outputPath ? resolve(outputPath) : join(paths.downloads, beginInfo.suggestedFilename);
+    mkdirSync(dirname(finalPath), { recursive: true });
+    moveFile(stagedFile, finalPath);
 
     log.info('downloaded ' + finalPath + (done.totalBytes ? ' (' + done.totalBytes + ' bytes)' : ''));
     return finalPath;
   } finally {
     if (timer) clearTimeout(timer);
+    try { pageSession.close(); } catch {}
     try { await closeTarget(port, targetId); } catch {}
+    // Restore default download behavior so the user's manual downloads
+    // resume going wherever Chrome's Preferences say (usually ~/Downloads).
+    try {
+      await browser.send('Browser.setDownloadBehavior', { behavior: 'default' });
+    } catch {}
     browser.close();
+    // Clean up the staging dir. After our successful rename our file is no
+    // longer here; anything left is from cross-traffic (downloads the user
+    // manually triggered in their Chrome that briefly inherited our
+    // download path). The frameId filter prevents us from acting on those,
+    // but their .crdownload / completed files would otherwise pile up in
+    // ~/.cdp-bridge/downloads/staging-* forever.
+    try { rmSync(stagingDir, { recursive: true, force: true }); } catch {}
+  }
+}
+
+function moveFile(from, to) {
+  try {
+    renameSync(from, to);
+  } catch (err) {
+    if (err?.code !== 'EXDEV') throw err;
+    copyFileSync(from, to);
+    unlinkSync(from);
   }
 }

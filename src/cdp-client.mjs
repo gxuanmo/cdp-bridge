@@ -112,14 +112,21 @@ export async function connectBrowser(port) {
 
 /**
  * Open a new page and connect to its CDP target.
+ *
  * @param {number} port
  * @param {string} url
+ * @param {{ background?: boolean }} [opts] background=true creates the
+ *   tab without stealing focus — important in attach mode so the user's
+ *   current tab keeps their attention.
  * @returns {Promise<{ session: CdpSession, targetId: string }>}
  */
-export async function openPage(port, url) {
+export async function openPage(port, url, opts = {}) {
   const browser = await connectBrowser(port);
   /** @type {{ targetId: string }} */
-  const { targetId } = await browser.send('Target.createTarget', { url });
+  const { targetId } = await browser.send('Target.createTarget', {
+    url,
+    background: opts.background ?? false,
+  });
   browser.close();
 
   const wsUrl = 'ws://127.0.0.1:' + port + '/devtools/page/' + targetId;
@@ -140,4 +147,17 @@ export async function closeTarget(port, targetId) {
   } finally {
     browser.close();
   }
+}
+
+/**
+ * Close a page session and its CDP target. Safe to call on already-closed
+ * sessions (errors are swallowed).
+ *
+ * @param {number} port
+ * @param {CdpSession} session
+ * @param {string} targetId
+ */
+export async function closePage(port, session, targetId) {
+  try { session.close(); } catch {}
+  try { await closeTarget(port, targetId); } catch {}
 }

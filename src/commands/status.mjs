@@ -1,28 +1,35 @@
 import { readState } from '../state.mjs';
-import { isSidecarRunning, probeCdp } from '../chrome-manager.mjs';
+import { isChromeReady, probeCdp } from '../chrome-manager.mjs';
 import { log } from '../logger.mjs';
 
 /**
- * cdpb status — print pid/port and whether CDP is reachable.
+ * cdpb status — show current Chrome session state.
  *
  * Output forms:
- *  - `never-launched`            no state.json or no pid ever recorded
- *  - `stopped (...)`             state.json exists, no pid (cdpb stop ran)
- *  - `dead pid=N port=P`         pid recorded but process gone (crash)
- *  - `ready pid=N port=P ...`    sidecar alive and CDP responds
+ *  - `never-launched`             no state.json or no session ever recorded
+ *  - `stopped at=...`             prior session was stopped (cdpb stop)
+ *  - `dead pid=N port=P`          spawn-mode pid recorded but process gone
+ *  - `attach-stale port=P`        attach-mode but probe failed — user
+ *                                 likely closed/restarted Chrome without flags
+ *  - `ready mode=M port=P ...`    session reachable
  */
 export async function run() {
   const s = readState();
-  if (!s.pid) {
+  if (!s.mode) {
     if (s.lastStoppedAt) log.raw('stopped at=' + s.lastStoppedAt);
     else log.raw('never-launched');
     return;
   }
-  const alive = await isSidecarRunning();
-  if (!alive) {
-    log.raw('dead pid=' + s.pid + ' port=' + s.port);
+
+  const ready = await isChromeReady();
+  if (!ready) {
+    if (s.mode === 'spawn') log.raw('dead pid=' + s.pid + ' port=' + s.port);
+    else log.raw('attach-stale port=' + s.port + ' — user Chrome closed or lost CDP flag');
     return;
   }
+
   const v = await probeCdp(s.port);
-  log.raw('ready pid=' + s.pid + ' port=' + s.port + ' product=' + (v?.Browser ?? 'unknown') + ' proxy=' + (s.proxy ?? 'none'));
+  let line = 'ready mode=' + s.mode + ' port=' + s.port + ' product=' + (v?.Browser ?? 'unknown');
+  if (s.mode === 'spawn') line += ' pid=' + s.pid + ' proxy=' + (s.proxy ?? 'none');
+  log.raw(line);
 }

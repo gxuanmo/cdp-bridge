@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { mkdirSync, readdirSync, statSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { isSidecarRunning } from '../chrome-manager.mjs';
+import { isChromeReady } from '../chrome-manager.mjs';
 import { downloadViaChrome } from '../download.mjs';
 import { readState } from '../state.mjs';
 import { log } from '../logger.mjs';
@@ -27,8 +27,8 @@ export async function run(argv) {
   const global = argv.includes('-g') || argv.includes('--global');
   const keep = argv.includes('--keep');
 
-  if (!(await isSidecarRunning())) {
-    throw new Error('sidecar Chrome not running. Run `cdpb launch` first.');
+  if (!(await isChromeReady())) {
+    throw new Error('no Chrome session ready. Run `cdpb launch` first.');
   }
   const { port } = readState();
 

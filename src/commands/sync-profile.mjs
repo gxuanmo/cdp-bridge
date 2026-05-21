@@ -1,24 +1,36 @@
 import { syncProfile } from '../profile-sync.mjs';
-import { isSidecarRunning } from '../chrome-manager.mjs';
+import { readState } from '../state.mjs';
+import { isChromeReady } from '../chrome-manager.mjs';
 import { log } from '../logger.mjs';
 
 /**
  * cdpb sync-profile [--full]
  *
- * Refresh sidecar profile from user's main Chrome.
+ * Refresh **sidecar** profile from user's main Chrome. This is a spawn-mode
+ * operation: it copies files from the user's normal Chrome User Data into
+ * `~/.cdp-bridge/chrome-profile/`. It is meaningless in attach mode (we
+ * don't keep our own profile dir there).
  *
  *  - Default (resync): copies bookmarks, extensions, prefs, etc. Skips
  *    ABE-protected files (Cookies, Login Data, Web Data) so the sidecar's
- *    own logins are preserved. This is what you want most of the time.
- *  - --full: copies ABE-protected files too. Useful only on first launch
- *    (where there's nothing to preserve) or as a manual reset that wipes
- *    sidecar's accumulated logins.
+ *    own logins are preserved.
+ *  - --full: copies ABE-protected files too. Useful only on first spawn
+ *    (where there's nothing to preserve) or as a manual reset.
  *
- * Refuses to run while sidecar is up — Chrome holds Preferences/Extensions
- * open, sync would partially fail. Stop sidecar first.
+ * Refuses to run while a spawned sidecar is up — Chrome holds Preferences/
+ * Extensions open and the sync would partially fail.
  */
 export async function run(argv) {
-  if (await isSidecarRunning()) {
+  const s = readState();
+
+  if (s.mode === 'attach') {
+    throw new Error(
+      'sync-profile is a spawn-mode operation; current session is attached to your daily Chrome. ' +
+        'There is no sidecar profile to refresh in attach mode.',
+    );
+  }
+
+  if (s.mode === 'spawn' && (await isChromeReady())) {
     throw new Error('sidecar Chrome is running — `cdpb stop` first, then `cdpb sync-profile`');
   }
 

@@ -1,99 +1,151 @@
 # cdp-bridge
 
-Drive a sidecar Chrome via CDP, reusing your real profile (proxies, cookies, extensions) without touching your daily Chrome.
+A small CLI (`cdpb`) that drives Chrome via the **Chrome DevTools Protocol** so agents and scripts can download files, navigate, and interact through a real browser — keeping your network setup (system proxy, VPN, ISP route), your login state, and your extensions.
 
-## Why
+Two modes:
 
-GitHub / npm / generic web fetches from China are often dog-slow on raw `curl`. A user's daily Chrome usually has the right network setup (system proxy pointed at a LAN Clash, browser extension proxy, etc.). But manually wiring `chrome://inspect` every time you want CDP access is friction.
+- **attach** (default) — connect to your daily Chrome over CDP. No profile copy, no cookie loss, you get **full login state and the warm cache** of the browser you actually use. Requires Chrome to be launched with `--remote-debugging-port=9222`; `cdpb setup-shortcut` adds that to your shortcut once.
+- **spawn** — launch an isolated sidecar Chrome on port `9223` with a selectively-copied profile in `~/.cdp-bridge/chrome-profile/`. Useful if you don't want any automation reaching into your daily Chrome. **Logins won't transfer** (Chrome 127+ App-Bound Encryption — see below); you'll log in once per site in the sidecar.
 
-`cdp-bridge` automates that: it takes a selective copy of your daily Chrome's profile (extensions, cookies, login state, preferences), launches a separate Chrome instance with `--remote-debugging-port`, and gives you a small CLI (`cdpb`) so any agent or script can drive it.
+Node 22+ and zero npm dependencies. Windows-first; macOS/Linux not supported in v0.x.
 
-Your daily Chrome stays untouched.
+---
 
 ## Install
 
 ```powershell
-git clone <this repo> D:\Desktop\project\cdp-bridge
+git clone <this-repo> D:\Desktop\project\cdp-bridge
 cd D:\Desktop\project\cdp-bridge
 npm link
 ```
 
-That puts `cdpb` on PATH.
+Puts `cdpb` on PATH. There are no dependencies to install — the project uses Node's built-in WebSocket / fs / child_process / test runner.
 
-## Quick start
+---
+
+## First-time setup (attach mode)
+
+Required because Chrome 136+ refuses to bind `--remote-debugging-port` unless you also pass `--user-data-dir`. `cdpb setup-shortcut` adds both:
 
 ```powershell
-cdpb launch                                           # first run: copies profile, starts Chrome
-cdpb status                                           # ready pid=12345 port=9222 product=Chrome/147 proxy=192.168.10.124:7897
-cdpb install-skill alchaincyf/huashu-design -g        # downloads zip via Chrome → npx skills add
-cdpb fetch <url> -o D:\downloads\file.zip             # any URL via the sidecar
-cdpb stop                                             # kill sidecar Chrome
+cdpb setup-shortcut          # patches your taskbar / Start Menu / Public Desktop Chrome shortcuts
+# - Then COMPLETELY close every Chrome window. Chrome is single-instance;
+#   if any chrome.exe is still alive, the next launch merges into it and
+#   the new flags are silently dropped.
+# - Re-open Chrome from the modified shortcut (the taskbar icon you just
+#   patched). Yellow "automated test software" banner = CDP is on.
+cdpb launch                  # probes 127.0.0.1:9222, attaches
+cdpb status                  # ready mode=attach port=9222 product=Chrome/147
 ```
+
+Roll back with `cdpb setup-shortcut --revert`. The legacy `--remote-allow-origins` flag from earlier cdpb versions is also stripped on revert.
+
+If your usual Chrome entry isn't a `.lnk` (e.g., the OS file-association handler when you double-click an `.html`), add `--include-registry` to also patch `HKCU\Software\Classes\ChromeHTML\shell\open\command` (user-scope, no admin needed).
+
+---
 
 ## Commands
 
-| Command | Use |
-|---------|-----|
-| `cdpb launch [--port N] [--proxy <addr>\|none] [--headless] [--no-sync]` | start sidecar Chrome |
-| `cdpb status` | print pid, port, proxy, ready/dead |
-| `cdpb stop` | terminate sidecar Chrome |
-| `cdpb fetch <url> [-o <path>] [--timeout <ms>]` | download via Chrome (uses real profile) |
-| `cdpb install-skill <owner/repo> [--branch <b>] [-g] [--keep]` | one-shot: download GitHub zip + extract + `npx skills add` |
+| Command | What it does |
+|---|---|
+| `cdpb launch [--attach \| --spawn] [--port N] [--proxy <addr>\|none] [--resync] [--headless]` | Start a Chrome session. Default tries attach to 9222; if no Chrome is there, prints actionable advice and exits non-zero (no silent fallback). `--spawn` forces sidecar mode. |
+| `cdpb status` | `ready mode=… port=… …` / `dead` / `attach-stale` / `stopped at=…` / `never-launched` |
+| `cdpb stop` | End session. Spawn mode: graceful CDP `Browser.close` first (flushes cookies/IndexedDB to SQLite), polls 5s for natural exit, falls back to `taskkill /T /F`. Attach mode: only clears the state record; **never kills your daily Chrome**. |
+| `cdpb setup-shortcut [--dry-run] [--revert] [--force] [--include-registry]` | Add CDP flags to Chrome `.lnk` shortcuts (and optionally HKCU registry handler). Refuses to patch when Chrome is running (use `--force` to override). |
+| `cdpb sync-profile [--full]` | (Spawn mode only.) Refresh non-cookie state (bookmarks, extensions, preferences) from your daily Chrome to `~/.cdp-bridge/chrome-profile/`. `--full` also copies ABE-protected files (cookies, login data) — only useful on first launch where there's nothing to preserve. Refuses while a sidecar is running. |
+| `cdpb fetch <url> [-o <path>] [--timeout <ms>]` | Download `<url>` via the active Chrome session in a **background tab** (no focus stealing). Returns the saved path on stdout. |
+| `cdpb install-skill <owner/repo> [--branch <b>] [-g] [--keep]` | One-shot: fetch GitHub zip via Chrome, extract with `Expand-Archive`, then `npx skills add <extracted-dir>`. Tries `master` then `main` if no `--branch`. |
+| `cdpb screenshot <url> [-o <path>] [--full-page]` | Open `<url>` in a background tab, capture a full-resolution PNG screenshot. `--full-page` captures the entire scrollable page, not just the viewport. |
+| `cdpb exec <url> <js>` | Open `<url>` in a background tab, evaluate `<js>` via `Runtime.evaluate`, print the returned value as JSON on stdout. |
+| `cdpb tab list\|new\|close` | Manage browser tabs. `list` outputs a JSON array of page targets. `new <url>` opens a background tab. `close <targetId>` closes by CDP target id. |
 
-## Proxy
+All commands log progress to `stderr` prefixed `[cdpb]`. Structured results (file paths, status strings) go to `stdout` so they pipe cleanly.
 
-cdpb auto-reads Windows system proxy (`HKCU\...\Internet Settings\ProxyServer`) and passes it to Chrome via `--proxy-server`. We don't rely on Chrome's auto-pickup because we observed it being flaky for LAN proxies like `192.168.x.x:7897`.
+---
 
-- `--proxy 127.0.0.1:7890` — explicit override
-- `--proxy none` — disable proxy (direct connect)
-- (no flag) — auto-use system proxy
+## Why two modes — the Chrome 127+ App-Bound Encryption story
 
-The chosen proxy is persisted to `~/.cdp-bridge/state.json` and shown by `cdpb status`.
+Chrome 127 (July 2024) shipped App-Bound Encryption (ABE) to defeat cookie-stealing malware. The implication for any tool that *copies* a Chrome profile to another Chrome instance:
 
-## What gets copied to sidecar profile
+| File | Transfers across Chrome instances? |
+|---|---|
+| Bookmarks, Top Sites, Favicons | ✅ |
+| Preferences (theme, proxy, search engines) | ✅ |
+| Extensions + Local Extension Settings + Local Storage | ✅ |
+| `Default/Network/Cookies` (httpOnly cookies — almost all logins) | ❌ ABE-encrypted, recipient Chrome can't decrypt |
+| `Default/Login Data` (saved passwords) | ❌ Same |
+| `Default/Web Data` (autofill, payment methods) | ❌ Same |
 
-Selective: `~260MB` mostly extensions. Skip cache/history/sessions to avoid bloat and lock conflicts. Specifically:
+So **spawn mode preserves everything visible** but you re-log into each site once in the sidecar. **Attach mode is the same Chrome instance**, so ABE is satisfied trivially — full login state.
 
-- `Local State` (encryption keys for cookies/passwords)
-- `Default/Network/` (cookies, transport security)
-- `Default/Login Data*` (saved passwords)
-- `Default/Preferences`, `Default/Secure Preferences`
-- `Default/Extensions/`, `Default/Local Extension Settings/`
-- `Default/Extension Cookies*`
-- `Default/Local Storage/`
+`cdpb` doesn't try to bypass ABE (the `--disable-features=AppBoundEncryption` flag doesn't help — it only affects new writes, not decrypting existing data) and won't pretend it can. If you want full login transfer, use attach.
 
-After that, sidecar profile is independent. To refresh from main profile (e.g., after logging into a new site), `cdpb stop && rm -rf ~/.cdp-bridge/chrome-profile && cdpb launch`.
+---
 
-## Sidecar layout
+## Concurrency
+
+A file lock at `~/.cdp-bridge/.lock` serializes any cdpb command that mutates state or touches Chrome (`launch`, `stop`, `fetch`, `install-skill`, `sync-profile`, `setup-shortcut`, `screenshot`, `exec`, `tab`). Two parallel `cdpb fetch` calls otherwise race on `Browser.setDownloadBehavior` (which is browser-context-wide). `cdpb status` is read-only and excluded.
+
+Stale-lock recovery: if the lock points at a dead pid (crashed/Ctrl-Ced cdpb), the next command auto-cleans it. If you really need to nuke it, delete `~/.cdp-bridge/.lock`.
+
+---
+
+## State and disk
 
 ```
 ~/.cdp-bridge/
-├─ chrome-profile/         # sidecar Chrome's user-data-dir
-├─ downloads/              # default for cdpb fetch (auto-cleaned per call)
-├─ state.json              # { pid, port, proxy, profileSyncedAt }
-└─ logs/
-   └─ chrome-stderr.log    # Chrome's stderr (errors, extension issues)
+├── chrome-profile/   # sidecar Chrome's user-data-dir (spawn mode only)
+├── downloads/        # cdpb fetch staging — cleaned after each call
+├── logs/             # Chrome stderr in spawn mode
+├── state.json        # { mode, pid, port, proxy, profileSyncedAt, lastStoppedAt }
+└── .lock             # acquired by stateful commands
 ```
 
-## Constraints
+Full uninstall:
 
-- **Windows only (v1)**. Mac/Linux later.
-- **Chrome stable only** at standard install paths.
-- **Don't run on shared/public PCs** — the CDP port is open to all local processes; whoever holds the port owns Chrome.
-- **Chrome shows a yellow "automated test software" banner** — that's CDP, can't be hidden.
+```powershell
+cdpb stop
+cdpb setup-shortcut --revert
+cd D:\Desktop\project\cdp-bridge ; npm unlink -g
+Remove-Item C:\Users\$env:USERNAME\.cdp-bridge -Recurse -Force
+Remove-Item C:\Users\$env:USERNAME\.claude\skills\cdp-bridge -Recurse -Force
+```
 
-## Known limits
+---
 
-- Cookies/login state are a snapshot; sites you log into in your daily Chrome won't appear in sidecar until you re-sync (manual for now, `cdpb sync-profile` is v2).
-- `cdpb fetch` only handles URLs that trigger a Chrome download (`Content-Disposition: attachment` or known archive types). Plain text/HTML pages won't trigger `Browser.downloadWillBegin` and will time out.
+## Tests
 
-## Debugging
+```powershell
+npm test
+```
 
-Chrome stderr lives at `~/.cdp-bridge/logs/chrome-stderr.log`. The `[cdpb]` prefix on stderr means CLI-emitted; everything else is Chrome itself.
+Runs 67 unit tests via Node's built-in test runner (`node --test`). Covers:
+- Pure parsing helpers in `setup-shortcut.mjs` (quote-aware tokenization, idempotent flag injection, legacy-flag stripping on revert, registry-value patcher).
+- File lock correctness in `lock.mjs` (concurrent serialization, stale-lock recovery, cleanup after fn completes/throws, `isAlive`/`unlinkIfUnchanged`/`handleStaleLock` helpers).
+- Argument parsing for new commands in `screenshot.mjs`, `exec.mjs`, and `tab.mjs` (URL extraction, flag handling, subcommand routing).
 
-If `cdpb status` shows `dead`, `cdpb launch` again — it'll detect the missing process.
+Manual integration tests (have side effects on sidecar Chrome, not in CI):
 
-If downloads stall: `cdpb status` to confirm proxy looks right; `curl -x <proxy> <url>` directly to compare. If curl is fast and cdpb fetch is slow, file an issue with chrome-stderr.log.
+```powershell
+node test/manual-cookie-persistence.mjs   # cookies survive cdpb stop+launch
+```
+
+---
+
+## Safety / known constraints
+
+- Chrome's yellow "automated test software" banner is unavoidable when CDP is on.
+- The CDP port binds `127.0.0.1` only — but it's trusted by anything on the same machine. **Don't run cdpb on a shared/public PC.**
+- `Browser.setDownloadBehavior` is browser-context-wide. During a `cdpb fetch` (a window of seconds for small files, minutes for big ones), any download the user manually triggers in their Chrome temporarily lands in our staging dir. The `frameId` filter prevents us from confusing it for our own download, and `cdpb fetch` cleans the staging dir on exit — but if the user's manual download was still in-flight at that moment, the orphan files go away with it.
+- `cdpb setup-shortcut` modifies user-level shortcuts without admin. Machine-wide shortcuts (Public Desktop, ProgramData Start Menu) are patched only if you have admin rights; otherwise they're reported as `failed:` and skipped.
+
+## Won't-do (deliberately)
+
+- Bypass / work around ABE — Chrome treats this as malware behavior.
+- Kill or relaunch the user's daily Chrome process. Attach mode connects, never controls lifecycle.
+- macOS / Linux support (v0.x is Windows-only).
+- Chrome Beta / Canary / Edge / Brave detection (only stable Chrome at its default install path).
+- Modify HKLM (machine-wide) registry. `--include-registry` only writes HKCU.
 
 ## License
 

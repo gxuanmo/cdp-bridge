@@ -1,4 +1,4 @@
-import { isSidecarRunning } from '../chrome-manager.mjs';
+import { isChromeReady } from '../chrome-manager.mjs';
 import { downloadViaChrome } from '../download.mjs';
 import { readState } from '../state.mjs';
 import { log } from '../logger.mjs';
@@ -6,7 +6,10 @@ import { log } from '../logger.mjs';
 /**
  * cdpb fetch <url> [-o <output-path>] [--timeout <ms>]
  *
- * Downloads via the sidecar Chrome so the user's proxy/extensions apply.
+ * Downloads via the active Chrome session — your daily Chrome in attach
+ * mode (so your proxy / login state apply natively), or the spawned
+ * sidecar in spawn mode. Uses a background tab so the user's current tab
+ * is not disturbed.
  */
 export async function run(argv) {
   const url = argv.find((a) => /^https?:\/\//i.test(a));
@@ -17,8 +20,8 @@ export async function run(argv) {
   const tIdx = argv.findIndex((a) => a === '--timeout');
   const timeoutMs = tIdx >= 0 ? Number(argv[tIdx + 1]) : 600000;
 
-  if (!(await isSidecarRunning())) {
-    throw new Error('sidecar Chrome not running. Run `cdpb launch` first.');
+  if (!(await isChromeReady())) {
+    throw new Error('no Chrome session ready. Run `cdpb launch` first.');
   }
   const { port } = readState();
 

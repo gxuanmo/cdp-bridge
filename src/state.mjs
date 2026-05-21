@@ -4,9 +4,15 @@ import { paths } from './paths.mjs';
 
 /**
  * Read state.json. Returns empty object if missing or unreadable.
- * Shape: { pid?: number, port?: number, proxy?: string,
- *          profileSyncedAt?: string, lastStoppedAt?: string }
- * @returns {{pid?: number, port?: number, proxy?: string, profileSyncedAt?: string, lastStoppedAt?: string}}
+ *
+ * Shape: { mode?: 'attach' | 'spawn',
+ *          pid?: number,             // spawn only — daily Chrome pid is unknown to us
+ *          port?: number,
+ *          proxy?: string,           // spawn only — what we passed to Chrome's --proxy-server
+ *          profileSyncedAt?: string, // spawn only — last successful sidecar profile copy
+ *          lastStoppedAt?: string }
+ *
+ * @returns {{mode?: 'attach' | 'spawn', pid?: number, port?: number, proxy?: string, profileSyncedAt?: string, lastStoppedAt?: string}}
  */
 export function readState() {
   if (!existsSync(paths.state)) return {};
@@ -18,8 +24,8 @@ export function readState() {
 }
 
 /**
- * Merge-write state.json.
- * @param {Partial<{pid: number, port: number, profileSyncedAt: string}>} patch
+ * Merge-write state.json. Pass `undefined` for any field to clear it.
+ * @param {Partial<{mode: 'attach' | 'spawn' | undefined, pid: number | undefined, port: number | undefined, proxy: string | undefined, profileSyncedAt: string | undefined, lastStoppedAt: string | undefined}>} patch
  */
 export function writeState(patch) {
   mkdirSync(dirname(paths.state), { recursive: true });
