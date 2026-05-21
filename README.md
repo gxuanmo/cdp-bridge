@@ -55,6 +55,9 @@ If your usual Chrome entry isn't a `.lnk` (e.g., the OS file-association handler
 | `cdpb sync-profile [--full]` | (Spawn mode only.) Refresh non-cookie state (bookmarks, extensions, preferences) from your daily Chrome to `~/.cdp-bridge/chrome-profile/`. `--full` also copies ABE-protected files (cookies, login data) — only useful on first launch where there's nothing to preserve. Refuses while a sidecar is running. |
 | `cdpb fetch <url> [-o <path>] [--timeout <ms>]` | Download `<url>` via the active Chrome session in a **background tab** (no focus stealing). Returns the saved path on stdout. |
 | `cdpb install-skill <owner/repo> [--branch <b>] [-g] [--keep]` | One-shot: fetch GitHub zip via Chrome, extract with `Expand-Archive`, then `npx skills add <extracted-dir>`. Tries `master` then `main` if no `--branch`. |
+| `cdpb screenshot <url> [-o <path>] [--full-page]` | Open `<url>` in a background tab, capture a full-resolution PNG screenshot. `--full-page` captures the entire scrollable page, not just the viewport. |
+| `cdpb exec <url> <js>` | Open `<url>` in a background tab, evaluate `<js>` via `Runtime.evaluate`, print the returned value as JSON on stdout. |
+| `cdpb tab list\|new\|close` | Manage browser tabs. `list` outputs a JSON array of page targets. `new <url>` opens a background tab. `close <targetId>` closes by CDP target id. |
 
 All commands log progress to `stderr` prefixed `[cdpb]`. Structured results (file paths, status strings) go to `stdout` so they pipe cleanly.
 
@@ -81,7 +84,7 @@ So **spawn mode preserves everything visible** but you re-log into each site onc
 
 ## Concurrency
 
-A file lock at `~/.cdp-bridge/.lock` serializes any cdpb command that mutates state or touches Chrome (`launch`, `stop`, `fetch`, `install-skill`, `sync-profile`, `setup-shortcut`). Two parallel `cdpb fetch` calls otherwise race on `Browser.setDownloadBehavior` (which is browser-context-wide). `cdpb status` is read-only and excluded.
+A file lock at `~/.cdp-bridge/.lock` serializes any cdpb command that mutates state or touches Chrome (`launch`, `stop`, `fetch`, `install-skill`, `sync-profile`, `setup-shortcut`, `screenshot`, `exec`, `tab`). Two parallel `cdpb fetch` calls otherwise race on `Browser.setDownloadBehavior` (which is browser-context-wide). `cdpb status` is read-only and excluded.
 
 Stale-lock recovery: if the lock points at a dead pid (crashed/Ctrl-Ced cdpb), the next command auto-cleans it. If you really need to nuke it, delete `~/.cdp-bridge/.lock`.
 
@@ -116,7 +119,10 @@ Remove-Item C:\Users\$env:USERNAME\.claude\skills\cdp-bridge -Recurse -Force
 npm test
 ```
 
-Runs 28 unit tests via Node's built-in test runner (`node --test`). Covers the pure parsing helpers in `setup-shortcut.mjs` (quote-aware tokenization, idempotent flag injection, legacy-flag stripping on revert, registry-value patcher).
+Runs 67 unit tests via Node's built-in test runner (`node --test`). Covers:
+- Pure parsing helpers in `setup-shortcut.mjs` (quote-aware tokenization, idempotent flag injection, legacy-flag stripping on revert, registry-value patcher).
+- File lock correctness in `lock.mjs` (concurrent serialization, stale-lock recovery, cleanup after fn completes/throws, `isAlive`/`unlinkIfUnchanged`/`handleStaleLock` helpers).
+- Argument parsing for new commands in `screenshot.mjs`, `exec.mjs`, and `tab.mjs` (URL extraction, flag handling, subcommand routing).
 
 Manual integration tests (have side effects on sidecar Chrome, not in CI):
 

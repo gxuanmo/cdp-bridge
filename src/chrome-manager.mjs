@@ -72,6 +72,17 @@ export async function isChromeReady() {
 }
 
 /**
+ * Guard: throws if no Chrome session is ready, otherwise returns the port.
+ * @returns {Promise<number>}
+ */
+export async function requirePort() {
+  if (!(await isChromeReady())) {
+    throw new Error('no Chrome session — run cdpb launch first');
+  }
+  return readState().port;
+}
+
+/**
  * Try to attach to the user's daily Chrome via CDP. Probes a list of common
  * ports (9222 by default; 9223 reserved for our spawned sidecar so we don't
  * accidentally attach to ourselves and re-spawn).
@@ -247,13 +258,22 @@ async function sendBrowserClose(port) {
   if (!v?.webSocketDebuggerUrl) return;
   await new Promise((resolve) => {
     const ws = new WebSocket(v.webSocketDebuggerUrl);
-    const timer = setTimeout(resolve, 1000);
+    let sentClose = false;
+    const finish = () => { clearTimeout(timer); resolve(); };
+    const timer = setTimeout(finish, 1000);
     ws.onopen = () => {
+      sentClose = true;
       ws.send(JSON.stringify({ id: 1, method: 'Browser.close' }));
       // Chrome closes the socket as it shuts down; that's our cue.
     };
-    ws.onclose = () => { clearTimeout(timer); resolve(); };
-    ws.onerror = () => { clearTimeout(timer); resolve(); };
+    ws.onclose = finish;
+    ws.onerror = (err) => {
+      if (!sentClose) {
+        const msg = err?.message || err?.error?.message || 'connection failed';
+        log.warn('Browser.close WebSocket error: ' + msg);
+      }
+      finish();
+    };
   });
 }
 

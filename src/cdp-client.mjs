@@ -148,3 +148,16 @@ export async function closeTarget(port, targetId) {
     browser.close();
   }
 }
+
+/**
+ * Close a page session and its CDP target. Safe to call on already-closed
+ * sessions (errors are swallowed).
+ *
+ * @param {number} port
+ * @param {CdpSession} session
+ * @param {string} targetId
+ */
+export async function closePage(port, session, targetId) {
+  try { session.close(); } catch {}
+  try { await closeTarget(port, targetId); } catch {}
+}

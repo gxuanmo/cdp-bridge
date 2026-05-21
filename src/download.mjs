@@ -1,4 +1,4 @@
-import { mkdirSync, renameSync, existsSync, rmSync } from 'node:fs';
+import { copyFileSync, mkdirSync, renameSync, existsSync, rmSync, unlinkSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { connectBrowser, openPage, closeTarget } from './cdp-client.mjs';
 import { paths } from './paths.mjs';
@@ -102,7 +102,7 @@ export async function downloadViaChrome({ port, url, outputPath, timeoutMs = 10 
 
     finalPath = outputPath ? resolve(outputPath) : join(paths.downloads, beginInfo.suggestedFilename);
     mkdirSync(dirname(finalPath), { recursive: true });
-    renameSync(stagedFile, finalPath);
+    moveFile(stagedFile, finalPath);
 
     log.info('downloaded ' + finalPath + (done.totalBytes ? ' (' + done.totalBytes + ' bytes)' : ''));
     return finalPath;
@@ -123,5 +123,15 @@ export async function downloadViaChrome({ port, url, outputPath, timeoutMs = 10 
     // but their .crdownload / completed files would otherwise pile up in
     // ~/.cdp-bridge/downloads/staging-* forever.
     try { rmSync(stagingDir, { recursive: true, force: true }); } catch {}
+  }
+}
+
+function moveFile(from, to) {
+  try {
+    renameSync(from, to);
+  } catch (err) {
+    if (err?.code !== 'EXDEV') throw err;
+    copyFileSync(from, to);
+    unlinkSync(from);
   }
 }

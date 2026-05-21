@@ -10,6 +10,9 @@ const COMMANDS = {
   'install-skill': () => import('../src/commands/install-skill.mjs'),
   'sync-profile': () => import('../src/commands/sync-profile.mjs'),
   'setup-shortcut': () => import('../src/commands/setup-shortcut.mjs'),
+  screenshot: () => import('../src/commands/screenshot.mjs'),
+  exec: () => import('../src/commands/exec.mjs'),
+  tab: () => import('../src/commands/tab.mjs'),
 };
 
 // Commands that mutate state.json or shared Chrome state. Wrapped in
@@ -17,7 +20,7 @@ const COMMANDS = {
 // (most notably Browser.setDownloadBehavior, which is browser-context-wide
 // — two simultaneous fetches would overwrite each other's download path).
 // `status` is read-only and excluded.
-const STATEFUL = new Set(['launch', 'stop', 'fetch', 'install-skill', 'sync-profile', 'setup-shortcut']);
+const STATEFUL = new Set(['launch', 'stop', 'fetch', 'install-skill', 'sync-profile', 'setup-shortcut', 'screenshot', 'exec', 'tab']);
 
 async function main() {
   const [, , cmd, ...rest] = process.argv;
@@ -58,6 +61,9 @@ function printHelp() {
     '  sync-profile [--full]                                           (spawn mode) refresh from main Chrome',
     '  fetch <url> [-o <path>] [--timeout <ms>]                        download via Chrome',
     '  install-skill <owner/repo> [--branch <b>] [-g]                  install a GitHub skill',
+    '  screenshot <url> [-o <path>] [--full-page]                       capture a PNG screenshot of a page',
+    '  exec <url> <js>                                                  execute JS in a page, print returned value',
+    '  tab list|new|close                                               manage browser tabs',
     '',
     'Two modes:',
     '  attach (default)  drive your daily Chrome via CDP — full cookies/login state.',

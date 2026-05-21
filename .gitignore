@@ -1,0 +1,3 @@
+node_modules/
+.claude/checkup-state.json
+.claude/checkup-reports/
