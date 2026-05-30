@@ -1,6 +1,6 @@
 import { copyFileSync, mkdirSync, renameSync, existsSync, rmSync, unlinkSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { connectBrowser, openPage, closeTarget } from './cdp-client.mjs';
+import { connectBrowser, openPage, closePage } from './cdp-client.mjs';
 import { paths } from './paths.mjs';
 import { log } from './logger.mjs';
 
@@ -108,8 +108,7 @@ export async function downloadViaChrome({ port, url, outputPath, timeoutMs = 10 
     return finalPath;
   } finally {
     if (timer) clearTimeout(timer);
-    try { pageSession.close(); } catch {}
-    try { await closeTarget(port, targetId); } catch {}
+    await closePage(port, pageSession, targetId);
     // Restore default download behavior so the user's manual downloads
     // resume going wherever Chrome's Preferences say (usually ~/Downloads).
     try {

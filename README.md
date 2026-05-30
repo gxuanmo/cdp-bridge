@@ -119,14 +119,18 @@ Remove-Item C:\Users\$env:USERNAME\.claude\skills\cdp-bridge -Recurse -Force
 npm test
 ```
 
-Runs 67 unit tests via Node's built-in test runner (`node --test`). Covers:
+Runs 75 unit tests via Node's built-in test runner (`node --test`). Covers:
 - Pure parsing helpers in `setup-shortcut.mjs` (quote-aware tokenization, idempotent flag injection, legacy-flag stripping on revert, registry-value patcher).
 - File lock correctness in `lock.mjs` (concurrent serialization, stale-lock recovery, cleanup after fn completes/throws, `isAlive`/`unlinkIfUnchanged`/`handleStaleLock` helpers).
-- Argument parsing for new commands in `screenshot.mjs`, `exec.mjs`, and `tab.mjs` (URL extraction, flag handling, subcommand routing).
+- Session lifecycle in `cdp-client.mjs` (CdpSession close rejects pending promises, WebSocket handler cleanup, readyState guard).
+- Navigation helpers in `page-utils.mjs` (dual-event load detection with `Page.loadEventFired` + `Page.lifecycleEvent` fallback, timeout handling).
+- Screenshot parameter building in `screenshot.mjs` (`buildCaptureScreenshotParams` clip calculation from layout metrics).
+- Argument parsing for `screenshot.mjs`, `exec.mjs`, and `tab.mjs` (URL extraction, flag handling, subcommand routing).
 
 Manual integration tests (have side effects on sidecar Chrome, not in CI):
 
 ```powershell
+npm run smoke                         # launch -> exec -> screenshot -> fetch -> stop
 node test/manual-cookie-persistence.mjs   # cookies survive cdpb stop+launch
 ```
 

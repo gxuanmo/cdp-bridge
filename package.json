@@ -8,7 +8,8 @@
   },
   "scripts": {
     "start": "node bin/cdpb.mjs",
-    "test": "node --test --test-reporter=spec test/*.test.mjs"
+    "test": "node --test --test-reporter=spec test/*.test.mjs",
+    "smoke": "node test/manual-smoke.mjs"
   },
   "engines": {
     "node": ">=22.0.0"

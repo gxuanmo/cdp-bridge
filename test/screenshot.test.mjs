@@ -1,6 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseScreenshotArgs } from '../src/commands/screenshot.mjs';
+import {
+  buildCaptureScreenshotParams,
+  parseScreenshotArgs,
+} from '../src/commands/screenshot.mjs';
 
 test('parseScreenshotArgs: extracts URL from argv', () => {
   const { url, output, fullPage } = parseScreenshotArgs(['https://example.com']);
@@ -57,4 +60,33 @@ test('parseScreenshotArgs: -o flag without value returns undefined', () => {
   const { url, output } = parseScreenshotArgs(['https://example.com', '-o']);
   assert.equal(url, 'https://example.com');
   assert.equal(output, undefined);
+});
+
+test('buildCaptureScreenshotParams: viewport screenshot has no clip', () => {
+  assert.deepEqual(
+    buildCaptureScreenshotParams({ cssContentSize: { width: 100, height: 200 } }, false),
+    { format: 'png' },
+  );
+});
+
+test('buildCaptureScreenshotParams: full page uses css content size', () => {
+  assert.deepEqual(
+    buildCaptureScreenshotParams({ cssContentSize: { width: 100.2, height: 2400.1 } }, true),
+    {
+      format: 'png',
+      captureBeyondViewport: true,
+      clip: { x: 0, y: 0, width: 101, height: 2401, scale: 1 },
+    },
+  );
+});
+
+test('buildCaptureScreenshotParams: falls back to legacy contentSize', () => {
+  assert.deepEqual(
+    buildCaptureScreenshotParams({ contentSize: { width: 763, height: 2400 } }, true),
+    {
+      format: 'png',
+      captureBeyondViewport: true,
+      clip: { x: 0, y: 0, width: 763, height: 2400, scale: 1 },
+    },
+  );
 });

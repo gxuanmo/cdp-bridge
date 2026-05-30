@@ -18,6 +18,27 @@ export function parseScreenshotArgs(argv) {
   return { url, output, fullPage };
 }
 
+/**
+ * @param {object} metrics CDP Page.getLayoutMetrics result
+ * @param {boolean} fullPage
+ * @returns {object} CDP Page.captureScreenshot params
+ */
+export function buildCaptureScreenshotParams(metrics, fullPage) {
+  const params = { format: 'png' };
+  if (!fullPage) return params;
+
+  params.captureBeyondViewport = true;
+  const size = metrics.cssContentSize ?? metrics.contentSize;
+  params.clip = {
+    x: 0,
+    y: 0,
+    width: Math.ceil(size.width),
+    height: Math.ceil(size.height),
+    scale: 1,
+  };
+  return params;
+}
+
 export async function run(argv) {
   const { url, output, fullPage } = parseScreenshotArgs(argv);
   const port = await requirePort();
@@ -25,10 +46,9 @@ export async function run(argv) {
   const { session, targetId } = await openPage(port, 'about:blank', { background: true });
   try {
     await navigateAndWait(session, url);
-    const { data } = await session.send('Page.captureScreenshot', {
-      format: 'png',
-      captureBeyondViewport: fullPage,
-    });
+    const metrics = await session.send('Page.getLayoutMetrics');
+    const params = buildCaptureScreenshotParams(metrics, fullPage);
+    const { data } = await session.send('Page.captureScreenshot', params);
     if (!data) throw new Error('screenshot returned empty data');
 
     const buf = Buffer.from(data, 'base64');

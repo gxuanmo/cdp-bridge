@@ -1,7 +1,7 @@
 /**
  * Navigate a page session to a URL and wait for the load event.
  *
- * Subscribe to Page.lifecycleEvent before sending Page.navigate to avoid
+ * Subscribe to Page.loadEventFired before sending Page.navigate to avoid
  * a race where the event fires before the subscription is in place.
  * about: and data: URLs skip the wait since they load synchronously
  * during Target.createTarget — the lifecycle events fire before we can
@@ -14,8 +14,10 @@
 export async function navigateAndWait(session, url, timeoutMs = 30000) {
   await session.send('Page.enable');
 
-  const isSynthetic = /^(about|data|blob):/i.test(url);
-  if (isSynthetic) return;
+  // Always call Page.navigate — don't assume the URL was pre-loaded via
+  // Target.createTarget. Callers (screenshot, exec) create tabs with
+  // about:blank, then navigate separately. If the URL was already loaded,
+  // Page.navigate to the same URL triggers a reload whose events we'll catch.
 
   let loaded = false;
 
@@ -25,28 +27,39 @@ export async function navigateAndWait(session, url, timeoutMs = 30000) {
     resolveLoad = resolve;
   });
 
-  const off = session.on('Page.lifecycleEvent', (p) => {
-    if (p.name === 'load' && !loaded) {
+  const markLoaded = () => {
+    if (!loaded) {
       loaded = true;
       resolveLoad();
     }
-  });
+  };
 
-  const { errorText } = await session.send('Page.navigate', { url });
-  if (errorText) {
-    off();
-    throw new Error('navigation failed: ' + errorText);
-  }
-
-  let timer;
-  const timeout = new Promise((_, rej) => {
-    timer = setTimeout(() => rej(new Error('page load timeout after ' + timeoutMs + 'ms')), timeoutMs);
+  const offLoad = session.on('Page.loadEventFired', markLoaded);
+  const offLifecycle = session.on('Page.lifecycleEvent', (p) => {
+    if (p.name === 'load' && !loaded) {
+      markLoaded();
+    }
   });
+  try { await session.send('Page.setLifecycleEventsEnabled', { enabled: true }); } catch {}
 
   try {
-    await Promise.race([loadPromise, timeout]);
+    const { errorText } = await session.send('Page.navigate', { url });
+    if (errorText) {
+      throw new Error('navigation failed: ' + errorText);
+    }
+
+    let timer;
+    const timeout = new Promise((_, rej) => {
+      timer = setTimeout(() => rej(new Error('page load timeout after ' + timeoutMs + 'ms')), timeoutMs);
+    });
+
+    try {
+      await Promise.race([loadPromise, timeout]);
+    } finally {
+      clearTimeout(timer);
+    }
   } finally {
-    clearTimeout(timer);
-    off();
+    offLoad();
+    offLifecycle();
   }
 }

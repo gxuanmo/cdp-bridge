@@ -5,7 +5,7 @@ import { probeCdp } from './chrome-manager.mjs';
  * Use connectBrowser() for browser-level domains (Target, Browser),
  * use connectPage() for page-level domains (Page, Network, Runtime).
  */
-class CdpSession {
+export class CdpSession {
   /** @param {string} wsUrl */
   constructor(wsUrl) {
     this.wsUrl = wsUrl;
@@ -21,16 +21,20 @@ class CdpSession {
   async connect() {
     return new Promise((resolve, reject) => {
       const ws = new WebSocket(this.wsUrl);
+      this.ws = ws; // store immediately so close() can abort the connection
       ws.onopen = () => {
-        this.ws = ws;
         resolve();
       };
-      ws.onerror = (e) => reject(new Error('CDP WebSocket error: ' + (e.message || 'unknown')));
+      ws.onerror = (e) => {
+        if (this.ws === ws) this.ws = null;
+        reject(new Error('CDP WebSocket error: ' + (e.message || 'unknown')));
+      };
       ws.onmessage = (msg) => this._onMessage(msg);
       ws.onclose = () => {
         const err = new Error('CDP socket closed');
         for (const { reject } of this.pending.values()) reject(err);
         this.pending.clear();
+        this.listeners.clear();
         this.ws = null;
       };
     });
@@ -63,7 +67,7 @@ class CdpSession {
    * @returns {Promise<T>}
    */
   send(method, params = {}) {
-    if (!this.ws) throw new Error('CDP not connected');
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) throw new Error('CDP not connected');
     const id = this.nextId++;
     const payload = { id, method, params };
     return new Promise((resolve, reject) => {
@@ -90,8 +94,22 @@ class CdpSession {
   }
 
   close() {
-    if (this.ws) this.ws.close();
+    const ws = this.ws;
     this.ws = null;
+    const err = new Error('CDP socket closed');
+    for (const { reject } of this.pending.values()) reject(err);
+    this.pending.clear();
+    this.listeners.clear();
+    if (!ws) return;
+    ws.onopen = null;
+    ws.onmessage = null;
+    ws.onerror = null;
+    ws.onclose = null;
+    try {
+      if (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN) {
+        ws.close();
+      }
+    } catch {}
   }
 }
 
@@ -122,16 +140,26 @@ export async function connectBrowser(port) {
  */
 export async function openPage(port, url, opts = {}) {
   const browser = await connectBrowser(port);
-  /** @type {{ targetId: string }} */
-  const { targetId } = await browser.send('Target.createTarget', {
-    url,
-    background: opts.background ?? false,
-  });
-  browser.close();
+  /** @type {string} */
+  let targetId;
+  try {
+    ({ targetId } = await browser.send('Target.createTarget', {
+      url,
+      background: opts.background ?? false,
+    }));
+  } finally {
+    browser.close();
+  }
 
   const wsUrl = 'ws://127.0.0.1:' + port + '/devtools/page/' + targetId;
   const sess = new CdpSession(wsUrl);
-  await sess.connect();
+  try {
+    await sess.connect();
+  } catch (err) {
+    sess.close();
+    await closeTarget(port, targetId);
+    throw err;
+  }
   return { session: sess, targetId };
 }
 
